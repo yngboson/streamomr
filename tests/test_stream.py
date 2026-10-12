@@ -30,8 +30,8 @@ def world(tmp_path_factory):
         return recognize(frame)
 
     w = {"layout": L}
-    w["A"] = next(r for r in (rec("sheet", s) for s in range(1, 12)) if r.status == "ok" and r.student_id and r.subject)
-    w["B"] = next(r for r in (rec("sheet", s) for s in range(2, 20)) if r.status == "ok" and r.student_id and r.subject
+    w["A"] = next(r for r in (rec("sheet", s) for s in range(1, 12)) if r.status == "ok" and r.student_id and r.subject and not r.id_guessed and not r.subject_guessed)
+    w["B"] = next(r for r in (rec("sheet", s) for s in range(2, 20)) if r.status == "ok" and r.student_id and r.subject and not r.id_guessed and not r.subject_guessed
                   and r.student_id != w["A"].student_id)
     w["empty"] = rec("none", 3)
     w["thumb"] = next(r for r in (rec("thumb2", s) for s in range(20, 40)) if r.status != "ok")
@@ -273,3 +273,29 @@ def test_read_sheet_is_not_reported_unread_and_gaps_do_not_split_episodes(world)
     s2 = StreamSession()
     run(s2, [T] * 3 + [E] * 6 + [A] * 4 + [E] * 6)
     assert len(s2.unread_episodes(final=True)) == 1         # the first stretch never read, the second did
+
+
+def guessed_id_sheet(A):
+    """Another student's sheet whose ID is only a best guess (every digit valued but flagged guessed)."""
+    r = similar_sheet_without_id(A)
+    r.id_digits = [dataclasses.replace(d, value=(d.value + 1) % 10 if d.value is not None else 0, guessed=True, ambiguous=True)
+                   for d in A.id_digits]
+    r.student_id = "".join(str(d.value) for d in r.id_digits)
+    r.flags = list(A.flags) + ["id_guessed"]
+    return r
+
+
+def test_guessed_id_is_no_evidence_a_pile_swap_still_commits_and_the_commit_stays_flagged(world):
+    A = world["A"]
+    N = guessed_id_sheet(A)
+    assert N.id_guessed and N.needs_review
+    cs = commits(run(StreamSession(), [A] * 4 + bad_frames(world, 2) + [N] * 4))
+    assert len(cs) == 2 and cs[1]["result"].id_guessed         # not mistaken for A put back; reaches the DB as a flagged guess
+    # a guessed digit never counts as agreeing evidence, even when it equals the committed digit
+    S = StreamSession()
+    run(S, [A] * 4)
+    assert S._same_by_evidence(N) is False
+    # the hint asks for a clearer ID instead of "hold still, reading keeps changing"
+    H = StreamSession()
+    H._since = 0.0
+    assert "ID" in H._unstable_hint(N, 99.0)

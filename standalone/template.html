@@ -5,16 +5,6 @@
 <style>
 /*__CSS__*/
 ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
-.modal { position:fixed; inset:0; background:rgba(0,0,0,.8); z-index:20; overflow:auto; padding:10px; }
-.modal[hidden] { display:none; }
-.modal .box { background:var(--card); border-radius:10px; padding:12px; max-width:720px; margin:0 auto; }
-.modal h2 { margin:0 0 6px; font-size:17px; }
-.qrow { border:1px solid #2a313b; border-radius:8px; padding:8px; margin:8px 0; }
-.qrow.bad { border-color:var(--bad); } .qrow.doubt { border-color:var(--warn); }
-.sheet { width:100%; display:block; border-radius:4px; background:#fff; margin:6px 0; }
-.chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
-.chip { padding:2px 8px; border-radius:6px; background:#2a313b; font-size:13px; }
-.chip.on { background:var(--ok); color:#000; } .chip.bad { background:var(--bad); color:#000; font-weight:700; } .chip.doubt { background:var(--warn); color:#000; font-weight:700; }
 </style></head>
 <body>
 <div class="scan">
@@ -40,10 +30,6 @@ ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
     <ul class="scans" id="recent"></ul>
   </div>
 </div>
-<div id="detail" class="modal" hidden><div class="box">
-  <div class="row" style="justify-content:space-between"><h2 id="dtitle"></h2><button id="dclose" class="secondary">닫기</button></div>
-  <div id="dbody"></div>
-</div></div>
 <div id="loading" class="loading"><div><b id="loadtitle">StreamOMR 불러오는 중</b><div id="loadmsg" class="mut"></div><div class="mut small">처음 한 번 약 30MB를 내려받습니다 (이후엔 캐시).</div></div></div>
 <script type="text/plain" id="worker-src">/*__WORKER__*/</script>
 <script type="application/json" id="omr-src">/*__SOURCES__*/</script>

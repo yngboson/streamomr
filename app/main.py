@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from omr import markers as mk
+from omr import db, markers as mk
 from omr.layout import Template
 from omr.recognize import recognize
 from omr.review import annotate_warped, cached_preview
@@ -329,6 +330,30 @@ def create_app(data_dir: str = "data", workers: int = 2) -> FastAPI:
                 img = cv2.resize(img, (w, max(1, round(img.shape[0] * w / img.shape[1]))), interpolation=cv2.INTER_AREA)
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
         return Response(buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+    @app.get("/api/scans/{scan_id}/detail")
+    def scan_detail(scan_id: int):
+        """What the detail view needs to show *where* a sheet is doubtful (same shape as the standalone page's
+        ``detail()``, minus the image: fetch /api/scans/{id}/image/warped, full resolution): bubble centres (mm),
+        per-choice darkness and the decision of every question / ID digit / subject digit."""
+        with db.session(svc.db_path) as c:
+            r = c.execute("SELECT result_json, page, student_id_raw, warped_path FROM scans WHERE id=?", (scan_id,)).fetchone()
+        if r is None:
+            raise HTTPException(404, f"no scan {scan_id}")
+        d = json.loads(r["result_json"])
+        bc, cal = d.get("bubble_centers_mm") or {}, d.get("calibration") or {}
+        if not r["warped_path"] or not bc.get("answers"):
+            raise HTTPException(404, "이 스캔에는 정렬된 시트 이미지/버블 좌표가 저장돼 있지 않습니다")
+        layout, _ = svc.scan_layout(scan_id)
+
+        def rows(items, centers):
+            return [dict(x, centers=centers[i], doubt=bool(x.get("ambiguous"))) for i, x in enumerate(items or []) if i < len(centers)]
+        answers = [dict(a, q=a["number"]) for a in rows(d.get("answers"), bc["answers"])]
+        return {"ppm": d.get("px_per_mm"), "page_w": layout.page_w, "page": r["page"], "student_id": r["student_id_raw"],
+                "subject_code": d.get("subject"), "flags": d.get("flags") or [],
+                "t_lo": cal.get("t_lo"), "t_hi": cal.get("t_hi"), "id_t_lo": cal.get("id_t_lo"), "id_t_hi": cal.get("id_t_hi"),
+                "answers": answers, "id": rows(d.get("id_digits"), bc.get("id") or []),
+                "subject": rows(d.get("subject_digits"), bc.get("subject") or [])}
 
     # ------------------------------------------------------------------ manual actions
     @app.post("/api/submissions/{submission_id}/adopt")

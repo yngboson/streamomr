@@ -330,7 +330,8 @@ class StreamSession:
         if self.allowed_forms is not None and r.form_key not in self.allowed_forms:
             self._run_key, self._run_n, self._best = None, 0, None
             return "Sheet is another form", None
-        if self.allowed_subjects is not None and r.subject is not None and r.subject not in self.allowed_subjects:
+        if (self.allowed_subjects is not None and r.subject is not None and not r.subject_guessed
+                and r.subject not in self.allowed_subjects):   # (a guessed subject never filters a sheet out)
             self._run_key, self._run_n, self._best = None, 0, None
             return "Sheet is another subject", None
         key = decision_key(r)
@@ -386,15 +387,16 @@ class StreamSession:
         records it as "possibly the same sheet" in the missed report.  No readable digit = no evidence: it
         commits (a missed sheet is worse than an extra commit)."""
         c = self._committed_res
-        if c is None or c.student_id is None or r.student_id is not None or (c.form_key, c.page) != (r.form_key, r.page):
+        if (c is None or c.student_id is None or c.id_guessed or (r.student_id is not None and not r.id_guessed)
+                or (c.form_key, c.page) != (r.form_key, r.page)):
             return False
-        if r.subject is not None and r.subject != c.subject:
+        if r.subject is not None and not r.subject_guessed and r.subject != c.subject:
             return False                            # a readable, different subject code is another sheet
         if (r.serial is not None or c.serial is not None) and r.serial != c.serial:
             return False
-        if all(d.value is not None for d in r.id_digits):
+        read = [(d.index, d.value) for d in r.id_digits if d.value is not None and not d.guessed]   # a guess is no evidence
+        if len(read) == len(r.id_digits):
             return False                            # (inconsistent: an ID that is fully read would not be None)
-        read = [(d.index, d.value) for d in r.id_digits if d.value is not None]
         if len(read) * 2 < len(c.id_digits) or any(c.student_id[i] != str(v) for i, v in read if i < len(c.student_id)):
             return False
         return [(a.number, a.state, a.marked) for a in c.answers] == [(a.number, a.state, a.marked) for a in r.answers]
@@ -424,9 +426,9 @@ class StreamSession:
         if not self._stuck(t):
             return "Reading..."
         q = r.quality or {}
-        if r.student_id is None:
+        if r.student_id is None or r.id_guessed:
             return "Student ID not readable - hold still, check the ID marks"
-        if r.subject is None:
+        if r.subject is None or r.subject_guessed:
             return "Subject code not readable - hold still, check the subject marks"
         if q.get("source_px_per_mm", 99) < LOW_RES_PX_PER_MM:
             return "Move closer"
@@ -476,14 +478,14 @@ class StreamSession:
                 if k in a.marked:
                     codes.append(B_MULTI if a.state == "multi" else B_AMBIGUOUS if a.ambiguous else B_MARKED)
                 else:
-                    codes.append(B_AMBIGUOUS if a.ambiguous and a.scores and a.scores[k] > 0.1 else B_EMPTY)
+                    codes.append(B_AMBIGUOUS if a.ambiguous and (a.guess == k or (a.scores and a.scores[k] > 0.1)) else B_EMPTY)
         for digits, rows in ((r.id_digits, r.bubble_centers_mm["id"]),
                              (r.subject_digits, r.bubble_centers_mm.get("subject") or [])):
             for d, row in zip(digits, rows):
                 for k, p in enumerate(row):
                     pts.append(p)
                     if d.value == k:
-                        codes.append(B_MARKED)
+                        codes.append(B_AMBIGUOUS if d.guessed else B_MARKED)
                     elif d.ambiguous and d.scores and d.scores[k] > 0.1:
                         codes.append(B_AMBIGUOUS)
                     else:

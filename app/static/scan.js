@@ -20,9 +20,10 @@ const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'
 
 // subject: digits, "" = form without subject code, null/undefined = not readable
 function subjLabel(subject) { return subject === null || subject === undefined ? '과목? 미확인' : subject === '' ? '' : '과목 ' + subject; }
-function addScan(kind, subject, studentId, page, prepend = true) {
+function addScan(kind, subject, studentId, page, prepend = true, scanId = null) {
   const li = document.createElement('li');
   li.innerHTML = `<span><b>${esc(subjLabel(subject))}</b> ${subject === '' ? '' : '&middot;'} <b>${esc(studentId ?? '(번호 없음)')}</b> &middot; ${page + 1}페이지</span><span class="badge ${esc(kind || 'rejected')}">${esc(kind || '?')}</span>`;
+  if (scanId) { li.style.cursor = 'pointer'; li.title = '눌러서 인식 상세 보기'; li.onclick = () => OmrDetail.openScan(scanId, `${subjLabel(subject)} ${studentId ?? '(번호 없음)'} · ${page + 1}페이지`.trim()); }
   prepend ? $('recent').prepend(li) : $('recent').append(li);
 }
 async function loadRecent() {
@@ -30,7 +31,7 @@ async function loadRecent() {
   const id = $('exam').value;
   try {
     const url = id ? `/api/exams/${id}/scans?limit=15` : '/api/scans/recent?limit=15';
-    (await (await fetch(url)).json()).forEach(s => addScan(s.kind, s.subject, s.student_id, s.page, false));
+    (await (await fetch(url)).json()).forEach(s => addScan(s.kind, s.subject, s.student_id, s.page, false, s.scan_id));
   } catch (e) {}
 }
 
@@ -119,7 +120,7 @@ function connect() {
     if (e.commit) {
       const o = e.commit.outcome, s = e.commit.summary;
       beep(); flash();
-      addScan(o.kind, o.subject === undefined ? s.subject : o.subject, o.student_id ?? s.student_id, o.page ?? s.page);
+      addScan(o.kind, o.subject === undefined ? s.subject : o.subject, o.student_id ?? s.student_id, o.page ?? s.page, true, o.scan_id);
       $('res').textContent = `${subjLabel(o.subject === undefined ? s.subject : o.subject)} · ${o.student_id ?? s.student_id ?? '(번호 없음)'}`;
       refreshCounts();
       if (navigator.vibrate) navigator.vibrate(60);

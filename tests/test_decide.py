@@ -234,3 +234,94 @@ def test_local_levels_only_go_down_in_a_lighter_region_and_ignore_ghosts():
     assert np.allclose(lv[:2], 0.7)                                     # dark / similar to the page: the page level, unchanged
     assert np.allclose(lv[7:], 0.5)   # lighter region: its own level; blank / ghost rows follow their neighbours
     assert np.allclose(inkmod.local_levels(np.array([0.0, 0.0]), 0.4, 0.7, [(range(2), True)]), 0.7)   # no marks in reach: page level
+
+
+# ------------------------------------------------------------------ best guesses: uncertain rows keep their flag AND a value
+def _row(vals, strength=None):
+    f = np.array(vals, float)
+    return f, (np.ones_like(f) if strength is None else np.asarray(strength, float))
+
+
+def _gpage(fa, fi, fs=None):
+    fa, fi = np.asarray(fa, float), np.asarray(fi, float)
+    return R.PageRaw([1, 2], [["A"] * 5] * 2, list(range(len(fi))), fa, np.ones_like(fa), fi, np.ones_like(fi), 0.5, 0.6)
+
+
+def test_guess_needs_a_leader_and_never_picks_an_unknowable_bubble():
+    f, s = _row([0.0, 0.40, 0.05, 0.0, 0.0])
+    assert R._guess(f, s, CAL) == 1                                           # weak but clearly the darkest
+    f, s = _row([0.0, 0.40, 0.35, 0.0, 0.0])
+    assert R._guess(f, s, CAL) is None                                        # two near-equal: nothing stands out
+    f, s = _row([0.02, 0.04, 0.03, 0.0, 0.01])
+    assert R._guess(f, s, CAL) is None                                        # noise on a blank row
+    f, s = _row([0.0, R.UNRELIABLE_FILL, 0.0, 0.0, 0.0], [1, R.UNRELIABLE_STRENGTH, 1, 1, 1])
+    assert R._guess(f, s, CAL) is None                                        # an invented value is not evidence
+
+
+def test_weak_rows_carry_a_guess_multi_rows_none_and_clear_blanks_do_not_but_stay_flagged_and_clear_blanks_do_not():
+    fa = [[0.0, 0.40, 0.05, 0.0, 0.0],         # weak: grey mark, ambiguous
+          [0.0, 0.0, 0.0, 0.0, 0.0]]          # clearly blank
+    d = R.decide_page(_gpage(fa, np.zeros((1, 10))))
+    q1, q2 = d.answers
+    assert q1.ambiguous and q1.guessed and q1.answer == 1
+    assert q2.state == "blank" and not q2.ambiguous and not q2.guessed and q2.answer is None
+    # a multi-mark row (even where one mark dominates) is never collapsed: no guess, the marks are the answer
+    fa = [[0.95, 0.0, 0.75, 0.4, 0.0], [0.0] * 5]
+    q = R.decide_page(_gpage(fa, np.zeros((1, 10)))).answers[0]
+    assert q.state == "multi" and q.marked == [0, 2] and q.guess is None and not q.guessed and q.answer is None
+    # two equal marks: no guess
+    fa = [[0.95, 0.0, 0.95, 0.4, 0.0], [0.0] * 5]
+    q = R.decide_page(_gpage(fa, np.zeros((1, 10)))).answers[0]
+    assert q.state == "multi" and q.answer is None and not q.guessed
+
+
+def test_guess_never_changes_state_marked_or_the_flag():
+    fa = [[0.0, 0.40, 0.05, 0.0, 0.0], [0.0, 0.0, 0.9, 0.0, 0.0]]
+    d = R.decide_page(_gpage(fa, np.zeros((1, 10))))
+    assert [a.ambiguous for a in d.answers] == [True, False] and d.answers[1].guessed is False
+    assert d.answers[1].answer == 2
+
+
+def test_uncertain_id_digit_gets_its_guess_and_the_id_is_flagged_guessed():
+    fi = np.zeros((3, 10))
+    fi[0, 4] = 0.95
+    fi[1, 7] = 0.95
+    fi[2, 2] = 0.40                             # weak: strict digit rules do not read it
+    d = R.decide_page(_gpage([[0.0] * 5] * 2, fi))
+    assert [x.value for x in d.id_digits] == [4, 7, 2] and [x.guessed for x in d.id_digits] == [False, False, True]
+    assert all(x.ambiguous for x in d.id_digits if x.guessed)
+    assert d.student_id == "472" and "id_guessed" in d.flags and "id_unreadable" not in d.flags
+    # a digit column that is clearly blank has no value: no ID at all (never invented)
+    fi[2] = 0.0
+    d = R.decide_page(_gpage([[0.0] * 5] * 2, fi))
+    assert d.student_id is None and d.id_digits[2].value is None and "id_guessed" not in d.flags
+
+
+def test_guessed_flags_and_serialisation():
+    from omr.recognize import RecognitionResult, OK
+    fi = np.zeros((2, 10))
+    fi[0, 1], fi[1, 3] = 0.95, 0.40
+    d = R.decide_page(_gpage([[0.0, 0.40, 0.05, 0.0, 0.0]] * 2, fi))
+    r = RecognitionResult(OK, answers=d.answers, id_digits=d.id_digits, student_id=d.student_id, flags=d.flags, subject="")
+    j = r.to_dict()
+    assert j["student_id"] == "13" and j["id_guessed"] and j["guessed_answers"] == 2 and j["needs_review"]
+    assert j["answers"][0]["guessed"] is True and j["id_digits"][1]["guessed"] is True and j["id_digits"][0]["guessed"] is False
+    assert "guessed_answers" in R.SOFT_FLAGS and "id_guessed" not in R.SOFT_FLAGS
+
+
+def test_fused_evidence_wins_over_a_single_frame_guess():
+    z = np.zeros((1, 10))
+    def raw(v):
+        fi = z.copy()
+        fi[0, 5] = v
+        return R.PageRaw([1], [["A"] * 5], [0], np.zeros((1, 5)), np.ones((1, 5)), fi, np.ones((1, 10)), 0.5, 0.6)
+    from omr.fusion import Track
+    class F:    # minimal frame stand-in for Track
+        def __init__(self, v):
+            self.raw, self.form_key, self.page, self.serial, self.quality, self.homography = raw(v), "k", 0, None, {}, None
+    tr = Track(1, F(0.40), 0.0)
+    assert tr.decisions().id_digits[0].guessed and "id_guessed" in tr.decisions().flags and tr.id_unreadable()
+    for i in range(4):
+        tr.add(F(0.95), 0.1 * i, None)                       # later frames read it cleanly: the median settles
+    d = tr.decisions()
+    assert d.id_digits[0].value == 5 and not d.id_digits[0].guessed and "id_guessed" not in d.flags and not tr.id_unreadable()

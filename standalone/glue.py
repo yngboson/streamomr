@@ -44,7 +44,7 @@ def summarize(result) -> dict:
 
 
 def _digit_rows(digits, centers):
-    return [{"state": d.state, "value": d.value, "doubt": bool(d.ambiguous), "scores": d.scores,
+    return [{"state": d.state, "value": d.value, "doubt": bool(d.ambiguous), "guessed": bool(getattr(d, "guessed", False)), "scores": d.scores,
              "centers": centers[i]} for i, d in enumerate(digits) if i < len(centers)]
 
 
@@ -61,7 +61,7 @@ def detail(result) -> dict:
     return {"img": base64.b64encode(jpg.tobytes()).decode("ascii"), "ppm": result.px_per_mm,
             "t_lo": cal.get("t_lo"), "t_hi": cal.get("t_hi"), "id_t_lo": cal.get("id_t_lo"), "id_t_hi": cal.get("id_t_hi"),
             "answers": [{"q": a.number, "state": a.state, "marked": list(a.marked), "labels": list(a.labels),
-                         "scores": a.scores, "doubt": bool(a.ambiguous), "centers": ans[i]}
+                         "scores": a.scores, "doubt": bool(a.ambiguous), "guessed": bool(getattr(a, "guessed", False)), "centers": ans[i]}
                         for i, a in enumerate(result.answers) if i < len(ans)],
             "id": _digit_rows(result.id_digits, bc.get("id", [])),
             "subject": _digit_rows(result.subject_digits, bc.get("subject", []))}

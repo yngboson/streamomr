@@ -855,7 +855,10 @@ def evaluate(res, truth: dict) -> dict:
            "q_silent_clear": 0, "id_wrong": 0, "id_ok": 0, "id_none": 0, "id_total": 1,
            "id_readable": 0, "id_missed": 0, "serial_total": 0, "serial_ok": 0, "serial_wrong": 0,
            "subject_total": 0, "subject_ok": 0, "subject_wrong": 0, "subject_none": 0, "subject_missed": 0,
-           "nosubj_ok": 0}
+           "nosubj_ok": 0,
+           # best guesses (flagged values of uncertain rows/digits): how many, how many right
+           "q_guessed": 0, "q_guess_ok": 0, "q_guess_on_blank": 0,
+           "id_guessed": 0, "id_guess_ok": 0, "subject_guessed": 0, "subject_guess_ok": 0}
     out["kinds"] = {}
     out["failures"] = []
     if res.status != "ok":
@@ -882,6 +885,10 @@ def evaluate(res, truth: dict) -> dict:
             out["failures"].append((tq["number"], tq["kind"], tq["expect"], tq["answer"], a.state, a.marked,
                                     a.ambiguous, a.scores))
         out["q_silent"] += silent
+        if a.guessed:
+            out["q_guessed"] += 1
+            out["q_guess_ok"] += int(exp in ("single", "flag") and a.answer == tq["answer"])   # (multi truth: never "right")
+            out["q_guess_on_blank"] += int(exp == "blank")
         if tq["kind"] == "clear" or tq["kind"] == "blank":
             out["q_clear"] += 1
             out["q_clear_ok"] += correct
@@ -898,9 +905,12 @@ def evaluate(res, truth: dict) -> dict:
         out["serial_wrong"] += int(res.serial not in (None, truth["serial"]))
     sid = truth["student_id"]
     out["id_readable"] = int(sid is not None)
-    if res.student_id is None:
+    if res.student_id is None or res.id_guessed:      # a guess is flagged, not a read: counted as "no ID" here ...
         out["id_none"] = 1
         out["id_missed"] = int(sid is not None)
+        if res.id_guessed:                              # ... and scored separately
+            out["id_guessed"] = 1
+            out["id_guess_ok"] = int(res.student_id == sid)
     elif res.student_id == sid:
         out["id_ok"] = 1
     else:
@@ -911,14 +921,25 @@ def evaluate(res, truth: dict) -> dict:
             out["nosubj_ok" if res.subject == "" else "subject_wrong"] = 1
         else:
             out["subject_total"] = 1
-            if res.subject is None:
+            if res.subject is None or res.subject_guessed:
                 out["subject_none"] = 1
                 out["subject_missed"] = int(subj is not None)
+                if res.subject_guessed:
+                    out["subject_guessed"] = 1
+                    out["subject_guess_ok"] = int(res.subject == subj)
             elif res.subject == subj:
                 out["subject_ok"] = 1
             else:
                 out["subject_wrong"] = 1
     return out
+
+
+def guess_line(tot: dict) -> str:
+    """Bench column: accuracy of the flagged best guesses (answers / ID / subject): right/guessed (percent)."""
+    def f(n, ok):
+        n, ok = tot.get(n, 0), tot.get(ok, 0)
+        return f"{ok}/{n}" + (f"({100.0 * ok / n:.0f}%)" if n else "")
+    return f"guess ok: ans {f('q_guessed', 'q_guess_ok')} id {f('id_guessed', 'id_guess_ok')} subj {f('subject_guessed', 'subject_guess_ok')}"
 
 
 def merge(tot: dict, ev: dict) -> None:

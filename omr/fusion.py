@@ -32,7 +32,8 @@ CONTRADICT_FILL = 0.6    # per-bubble fill swing that counts as a contradiction 
 CONTRADICT_BUBBLES = 2   # ... when at least this many bubbles swing
 JUMP_FRACTION = 0.2      # sheet-quad centre jump (fraction of sheet size) between consecutive frames
 SCALE_JUMP = 0.35        # relative change of the sheet size between consecutive frames
-ID_FLAGS = ("id_blank", "id_unreadable", "alignment_unverified", "subject_blank", "subject_unreadable")
+ID_FLAGS = ("id_blank", "id_unreadable", "alignment_unverified", "subject_blank", "subject_unreadable",
+            "id_guessed", "subject_guessed", "guessed_answers")
 
 
 def sheet_quad(r):
@@ -48,7 +49,7 @@ def sheet_quad(r):
 
 
 def _sig(answers, student_id, subject):
-    return (tuple((a.number, a.state, tuple(a.marked)) for a in answers), student_id, subject)
+    return (tuple((a.number, a.state, tuple(a.marked), a.guess) for a in answers), student_id, subject)
 
 
 def trustworthy(r) -> bool:
@@ -128,10 +129,10 @@ class Track:
     def _contradicts(self, r) -> bool:
         dec = self.decisions()
         for a, b in zip(dec.answers, r.answers):
-            if not a.ambiguous and not b.ambiguous and (a.state, a.marked) != (b.state, b.marked):
+            if not a.ambiguous and not b.ambiguous and (a.state, a.marked) != (b.state, b.marked):   # (a guessed row is ambiguous: never a contradiction)
                 return True
         for a, b in list(zip(dec.id_digits, r.id_digits)) + list(zip(dec.subject_digits, r.subject_digits)):
-            if a.value is not None and b.value is not None and a.value != b.value:
+            if a.value is not None and b.value is not None and not (a.guessed or b.guessed) and a.value != b.value:
                 return True
         fr, raw = self.fused_raw(), r.raw
         swing = int((np.abs(fr.FA - raw.FA) >= CONTRADICT_FILL).sum() + (np.abs(fr.FI - raw.FI) >= CONTRADICT_FILL).sum())
@@ -167,7 +168,10 @@ class Track:
         return out
 
     def id_unreadable(self) -> bool:
-        return "id_unreadable" in self.decisions().flags
+        """No confident ID yet: unreadable, or only a best guess (more frames may still settle it)."""
+        f = self.decisions().flags
+        return "id_unreadable" in f or "id_guessed" in f
 
     def subject_unreadable(self) -> bool:
-        return "subject_unreadable" in self.decisions().flags
+        f = self.decisions().flags
+        return "subject_unreadable" in f or "subject_guessed" in f

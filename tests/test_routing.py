@@ -322,3 +322,38 @@ def test_two_uploads_and_the_routing_api(tmp_path, sheets):
     assert c2.get(f"/api/exams/{hold['id']}/unassigned").json()["scans"] == []
     recent = c2.get("/api/scans/recent?limit=10").json()
     assert sorted((x["subject"], x["student_id"]) for x in recent) == [("07", "1001"), ("07", "1002"), ("08", "2001")]
+
+
+# ------------------------------------------------------------------ best guesses never become a confirmed student / subject
+def test_guessed_subject_goes_to_the_holding_exam_and_guessed_id_is_unassigned_with_a_suggestion(svc):
+    r = res("07", "1001")
+    r.update(subject_guessed=True, flags=["subject_guessed"], needs_review=True)
+    o = svc.ingest(r)
+    assert o.kind == "unassigned" and o.subject is None and o.reason == "subject_guessed"
+    r = res("07", "1002")
+    r.update(id_guessed=True, flags=["id_guessed"], needs_review=True)
+    o = svc.ingest(r)
+    assert o.kind == "unassigned" and o.subject == "07"                    # right exam, no student
+    assert svc.list_students(o.exam_id) == []
+    info = svc.unassigned_detail(o.exam_id)[0]
+    assert info["suggested_id"] == "1002" and info["suggested_subject"] is None
+    svc.assign_scan(o.scan_id, "1002")                                      # a human confirms the suggestion
+    assert svc.list_students(o.exam_id) == ["1002"]
+
+
+def test_guessed_answers_are_graded_and_exported_as_guessed(svc):
+    r = res("07", "1001", marks={2: []}, amb=(2, 3))
+    r["answers"][1].update(guess=3, guessed=True)             # q2: uncertain blank with a guess
+    r["answers"][2].update(state="multi", marked=[0, 1], guess=1, guessed=True)   # (legacy stored guess: ignored)
+    o = svc.ingest(r)
+    svc.set_answer_key(o.exam_id, [0, 3, 1] + [0] * 17)
+    st = svc.student_summary(o.exam_id, "1001")
+    assert st["answers"][2]["marked"] == [3] and st["answers"][2]["guessed"] and st["answers"][2]["ambiguous"]
+    assert st["answers"][3]["marked"] == [0, 1] and st["answers"][3]["state"] == "multi" and not st["answers"][3]["guessed"]
+    assert st["guessed_questions"] == [2] and st["multi_questions"] == [3] and st["status"] == "needs_review"
+    g = svc.grade(o.exam_id, "1001")
+    assert g["score"] == 19 and g["provisional"]                        # the multi row is wrong against a single-choice key
+    row = svc.export_csv(o.exam_id).splitlines()
+    assert "guessed:2" in row[1] and "multi:3" in row[1] and ",4,1|2," in row[1]
+    svc.set_answer_key(o.exam_id, [0, 3, [[0, 1]]] + [0] * 17)            # a set key: right only for exactly that set
+    assert svc.grade(o.exam_id, "1001")["score"] == 20

@@ -28,7 +28,8 @@ def world(tmp_path_factory):
         return recognize(frame)
 
     cands = [rec("sheet", s) for s in range(1, 25)]
-    good = [r for r in cands if r.status == "ok" and r.student_id and r.subject and not any(a.ambiguous for a in r.answers)]
+    good = [r for r in cands if r.status == "ok" and r.student_id and r.subject and not r.id_guessed and not r.subject_guessed
+            and not any(a.ambiguous for a in r.answers)]
     A = good[0]
     B = next(r for r in good if r.student_id != A.student_id and r.subject != A.subject)
     return {"A": A, "B": B, "E": rec("none", 3)}
@@ -54,15 +55,24 @@ def light_subject(r, digits, level=0.45):
     """The marks of the given subject-code digits come out too faint to read confidently in this frame."""
     FS = r.raw.FS.copy()
     for d in digits:
+        p = int(np.argmax(FS[d]))
         FS[d] = np.where(FS[d] > 0.5, level, FS[d])
+        FS[d, (p + 1) % 10] = level
     return remake(r, FS=FS)
+
+
+def unread(r) -> bool:
+    """No confident ID: unreadable, or only a flagged best guess (the guess is a value, never a read)."""
+    return r.student_id is None or r.id_guessed
 
 
 def light_digits(r, digits, level=0.45):
     """The marks of the given ID digits come out too faint to read confidently in this frame."""
     FI = r.raw.FI.copy()
     for d in digits:
+        p = int(np.argmax(FI[d]))
         FI[d] = np.where(FI[d] > 0.5, level, FI[d])
+        FI[d, (p + 1) % 10] = level          # two equal greys: truly unreadable, not even a best guess
     return remake(r, FI=FI)
 
 
@@ -78,7 +88,7 @@ def test_each_frame_unreadable_but_fusion_resolves_the_id(world):
     A = world["A"]
     nd = len(A.id_digits)
     seq = [light_digits(A, [i % nd, (i + 3) % nd, (i + 5) % nd]) for i in range(16)]
-    assert all(r.student_id is None for r in seq)                      # no single frame has the full ID
+    assert all(unread(r) for r in seq)                      # no single frame has the full ID
     cs = commits(run(StreamSession(), seq + [world["E"]] * 3))
     assert len(cs) == 1
     r = cs[0]["result"]
@@ -95,7 +105,7 @@ def test_unresolvable_id_is_held_then_committed_once_unreadable(world):
     assert evs.index(next(e for e in evs if "commit" in e)) * DT >= 1.5       # held while the sheet stays in view
     # the sheet leaves before the hold expires: committed at track end (not lost, not duplicated)
     evs = run(StreamSession(), seq[:6] + [E] * 4)
-    assert len(commits(evs)) == 1 and commits(evs)[0]["result"].student_id is None
+    assert len(commits(evs)) == 1 and unread(commits(evs)[0]["result"])
     # and a held track resolved by later frames commits ONCE, with the ID
     seq2 = seq[:4] + [A] * 8 + [E] * 3
     cs = commits(run(StreamSession(), seq2))
@@ -107,7 +117,7 @@ def test_finish_flushes_a_held_track(world):
     s = StreamSession()
     run(s, [light_digits(A, [0]) for _ in range(6)])
     c = s.finish()
-    assert c is not None and c["result"].student_id is None and s.finish() is None
+    assert c is not None and unread(c["result"]) and s.finish() is None
 
 
 def test_a_track_never_commits_twice(world):
@@ -138,11 +148,11 @@ def test_fast_swap_between_two_sheets_never_blends(world):
     for i in range(len(FI)):
         FI[i, (int(A.student_id[i]) + 3) % 10] = 0.45
     B2 = remake(A, FI=FI)
-    assert B2.student_id is None
+    assert unread(B2)
     evs = run(StreamSession(), [A] * 5 + [B2] * 8 + [world["E"]] * 3)
     cs = commits(evs)
     assert cs[0]["result"].student_id == A.student_id
-    assert len(cs) <= 2 and all(c["result"].student_id in (A.student_id, None) for c in cs)
+    assert len(cs) <= 2 and all(c["result"].student_id in (A.student_id, None) or c["result"].id_guessed for c in cs)
     assert not any(c["result"].student_id == A.student_id for c in cs[1:])      # B2 never inherits A's ID
 
 
@@ -189,7 +199,7 @@ def test_suppressed_recommit_is_never_silent(world):
     A, E = world["A"], world["E"]
     last = len(A.id_digits) - 1
     N = light_digits(A, [last])                    # same marks everywhere, last ID digit unreadable
-    assert N.student_id is None
+    assert unread(N)
     s = StreamSession()
     evs = run(s, [A] * 4 + [E] * 3 + [N] * 6 + [E] * 3)
     cs = commits(evs)

@@ -179,7 +179,8 @@ def test_subject_read_when_clear(assets):
 
 @pytest.mark.parametrize("kind", ["double", "blank", "stray", "erased", "half"])
 def test_hard_subject_marks_are_never_misread(assets, kind):
-    """A damaged subject digit leaves the subject unread (None) - or reads the right one - but is never wrong."""
+    """A damaged subject digit leaves the subject unread (None), reads the right one, or yields a best guess flagged
+    `subject_guessed` (needs review) - but is never wrong without a flag."""
     L, pdf = assets["q45"]
     n_none = 0
     for seed in range(8):
@@ -205,9 +206,9 @@ def test_hard_subject_marks_are_never_misread(assets, kind):
         r = recognize(plain_frame(img))
         assert r.status == "ok"
         truth = "".join(map(str, digits))
-        assert r.subject in (None, truth), (kind, seed, r.subject, truth)
+        assert r.subject in (None, truth) or r.subject_guessed, (kind, seed, r.subject, truth)   # a wrong value is only ever a FLAGGED guess
         if kind in ("double", "blank", "half"):
-            assert r.subject is None and r.needs_review
+            assert (r.subject is None or r.subject_guessed) and r.needs_review
             n_none += 1
         if r.subject is None:
             assert any(f in r.flags for f in ("subject_blank", "subject_unreadable"))

@@ -81,11 +81,23 @@ def norm_subject(v) -> Optional[str]:
     return s
 
 
+def _guessed(result: dict, what: str) -> bool:
+    """The result's student ID (what='id') / subject code carries a best guess, not a confident read."""
+    return bool(result.get(what + "_guessed")) or (what + "_guessed") in (result.get("flags") or [])
+
+
 def _answers_of(result: dict) -> Dict[int, dict]:
-    return {int(a["number"]): {"state": a["state"], "marked": sorted(int(x) for x in a["marked"]),
-                               "ambiguous": bool(a.get("ambiguous")),
-                               "confidence": float(a.get("confidence") or 0.0)}
-            for a in result.get("answers", [])}
+    """Effective per-question reading.  An uncertain blank row that carries a best guess counts as that single
+    choice (graded, exported) but stays ``ambiguous`` and ``guessed`` - it is never confirmed, only visible."""
+    out = {}
+    for a in result.get("answers", []):
+        state, marked, g = a["state"], sorted(int(x) for x in a["marked"]), a.get("guess")
+        guessed = g is not None and state == "blank" and bool(a.get("ambiguous"))    # a multi row is never collapsed to one choice
+        if guessed:
+            state, marked = "single", [int(g)]
+        out[int(a["number"])] = {"state": state, "marked": marked, "ambiguous": bool(a.get("ambiguous")),
+                                 "confidence": float(a.get("confidence") or 0.0), "guessed": guessed}
+    return out
 
 
 def content_hash(result: dict) -> str:
@@ -115,7 +127,7 @@ def same_variant(a, b) -> bool:
 
 def id_signature(result: dict) -> str:
     """Raw per-digit ID reading (state+value), used only when no full ID was read."""
-    if norm_student(result.get("student_id")) is not None:
+    if norm_student(result.get("student_id")) is not None and not _guessed(result, "id"):
         return ""
     digs = [[d.get("index"), d.get("state"), d.get("value")] for d in result.get("id_digits") or []]
     return hashlib.sha256(json.dumps(digs).encode()).hexdigest()
@@ -369,10 +381,10 @@ class OmrService:
             if subject not in ("", None):
                 return IngestOutcome("rejected", form_key=form_key, reason="subject read on a form without subject code")
             subject = ""
-        elif not (isinstance(subject, str) and subject.isdigit() and len(subject) == nd):
-            subject = None                                   # unreadable / blank / inconsistent: never guessed
+        elif _guessed(d, "subject") or not (isinstance(subject, str) and subject.isdigit() and len(subject) == nd):
+            subject = None       # unreadable / blank / inconsistent / only a best guess: holding exam (the guess stays in result_json)
 
-        raw_id = norm_student(d.get("student_id"))
+        raw_id = None if _guessed(d, "id") else norm_student(d.get("student_id"))   # a guessed ID is never a confirmed student
         paths = self._save_images(form_key, images)
         with db.session(self.db_path, write=True) as c:
             exam = self._ensure_exam(c, form_key, subject, layout)
@@ -388,7 +400,9 @@ class OmrService:
             if followed is not None:
                 return followed
             if subject is None:
-                reason = "subject_blank" if "subject_blank" in (d.get("flags") or []) else "subject_unreadable"
+                fl = d.get("flags") or []
+                reason = ("subject_blank" if "subject_blank" in fl else "subject_guessed" if "subject_guessed" in fl
+                          else "subject_unreadable")
                 self._act(c, exam["id"], "unassigned", scan_id=scan_id, detail={"reason": reason})
                 return IngestOutcome("unassigned", scan_id, exam["id"], page=page, reason=reason, subject=None,
                                      form_key=form_key)
@@ -845,7 +859,7 @@ class OmrService:
                 continue
             m = json.loads(mj)
             out[q] = {"state": "blank" if not m else "single" if len(m) == 1 else "multi", "marked": m,
-                      "ambiguous": False, "confidence": 1.0, "source": "override", "scan_id": None}
+                      "ambiguous": False, "guessed": False, "confidence": 1.0, "source": "override", "scan_id": None}
         return out
 
     def student_summary(self, exam_id: int, student_id: str) -> dict:
@@ -870,12 +884,14 @@ class OmrService:
                     d = json.loads(c.execute("SELECT result_json FROM scans WHERE id=?", (s["adopted_scan_id"],)).fetchone()[0])
                     # id_blank / id_unreadable only describe the sheet's ID area; once the scan belongs to a
                     # student (a human assigned it) they no longer call for review.
-                    flags = [f for f in hard_flags(d.get("flags")) if f not in ("id_blank", "id_unreadable")]
+                    flags = [f for f in hard_flags(d.get("flags")) if f not in ("id_blank", "id_unreadable", "id_guessed")]
                     if flags:
                         review_flags.append({"page": s["page"], "flags": flags})
         present = [s["page"] for s in subs]
         missing = [p for p in range(lay.total_pages) if p not in present]
         doubtful = sorted(q for q, a in answers.items() if a["ambiguous"] or a["state"] == "multi")
+        guessed = sorted(q for q, a in answers.items() if a.get("guessed") and a["ambiguous"])
+        multi = sorted(q for q, a in answers.items() if a["state"] == "multi")
         if conflicts:
             status = "conflict"
         elif missing:
@@ -886,7 +902,7 @@ class OmrService:
             status = "complete"
         return {"exam_id": exam_id, "student_id": student_id, "status": status, "total_pages": lay.total_pages,
                 "pages_present": present, "pages_missing": missing, "conflict_pages": conflicts,
-                "doubtful_questions": doubtful, "scan_flags": review_flags, "answers": answers,
+                "doubtful_questions": doubtful, "guessed_questions": guessed, "multi_questions": multi, "scan_flags": review_flags, "answers": answers,
                 "submission_ids": {s["page"]: s["id"] for s in subs}}
 
     def list_students(self, exam_id: int) -> List[str]:
@@ -982,6 +998,10 @@ class OmrService:
                 flags.append("conflict_pages:" + ",".join(str(p + 1) for p in st["conflict_pages"]))
             if st["doubtful_questions"]:
                 flags.append("doubtful:" + ",".join(map(str, st["doubtful_questions"])))
+            if st["multi_questions"]:
+                flags.append("multi:" + ",".join(map(str, st["multi_questions"])))      # 복수마킹; the cell shows the whole set
+            if st["guessed_questions"]:
+                flags.append("guessed:" + ",".join(map(str, st["guessed_questions"])))
             if st["scan_flags"]:
                 flags.append("scan_flags")
             if any(a["source"] == "override" for a in st["answers"].values()):
@@ -1140,6 +1160,8 @@ class OmrService:
                 return [{"index": x.get("index"), "state": x.get("state"), "value": x.get("value"),
                          "ambiguous": bool(x.get("ambiguous"))} for x in d.get(key) or []]
             info["id_digits"] = digits("id_digits")
+            info["suggested_id"] = d.get("student_id") if _guessed(d, "id") else None    # best guess, to be confirmed by a human
+            info["suggested_subject"] = d.get("subject") if _guessed(d, "subject") else None
             info["subject_digits"] = digits("subject_digits")
             info["subjects"] = subjects
             info["suggestions"] = [s for s in ids if s not in have]
@@ -1253,7 +1275,7 @@ def _grade(key, points, st) -> dict:
     for q, alts in sorted(key.items()):
         p = points.get(q, 1.0)
         a = st["answers"].get(q)
-        ok = bool(a) and a["marked"] in alts
+        ok = bool(a) and sorted(a["marked"]) in alts      # set-based: a multi row is right only for the same set
         per[q] = {"correct": ok, "points": p if ok else 0.0, "ambiguous": bool(a and a["ambiguous"])}
         score += per[q]["points"]
         mx += p

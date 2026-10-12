@@ -11,6 +11,7 @@
 <div class="card"><h2>이 학생의 스캔</h2><div class="grid2" id="scans"></div></div>
 </main>
 <script src="/static/common.js"></script>
+<script src="/static/detail.js"></script>
 <script>
 if (needExam()) {
 const SID = qs.get('student_id');
@@ -20,8 +21,9 @@ function accepted(q) { return (q.accepted || []).map(a => a.map(i => L()[i]).joi
 function qRow(q) {
   const cls = q.ambiguous || q.state === 'multi' ? 'q-doubt' : q.correct === true ? 'q-right' : q.correct === false ? 'q-wrong' : '';
   const tags = (q.source === 'override' ? '<span class="tag ovr">수정됨</span>' : '') +
-    (q.ambiguous ? '<span class="tag warn">애매</span>' : '') + (q.state === 'multi' ? '<span class="tag warn">복수</span>' : '') +
-    (q.state === null ? '<span class="tag warn">페이지 없음</span>' : '');
+    (q.ambiguous ? '<span class="tag warn">애매</span>' : '') + (q.state === 'multi' ? '<span class="tag warn">복수마킹</span>' : '') +
+    (q.state === null ? '<span class="tag warn">페이지 없음</span>' : '') +
+    (q.scan_id && q.source === 'scan' && (q.ambiguous || q.state === 'multi' || q.state === 'blank') ? ` <a href="#" data-detail="${q.scan_id}" data-q="${q.number}">확대</a>` : '');
   let res = q.graded ? (q.correct ? badge('ok', '정답') : badge('bad', '오답')) : '';
   let h = `<tr class="click ${cls}" data-q="${q.number}"><td>${q.number}</td><td>${q.marked === null ? '-' : esc(labelsOf(q.marked, L()))}</td>
     <td>${q.graded ? esc(accepted(q)) : '<span class="mut">-</span>'}</td>
@@ -53,7 +55,7 @@ function render() {
       <span>${s.adopted ? badge('ok', '채택') : ''} ${s.kind ? badge(s.kind, KIND_KO[s.kind] || s.kind) : ''}</span></div>
     <div class="mut small">${esc(SOURCE_KO[s.source] || s.source)} &middot; ${fmtTime(s.created_at)}</div>
     ${s.has_original ? `<a href="${img(s.scan_id, 'original')}" target="_blank"><img class="thumb" src="${img(s.scan_id, 'original', 360)}" loading="lazy" alt="원본"></a>` : ''}
-    ${s.has_warped ? `<div class="small"><a href="${img(s.scan_id, 'warped')}" target="_blank">정렬된 이미지</a></div>` : ''}
+    ${s.has_warped ? `<div class="small"><a href="${img(s.scan_id, 'warped')}" target="_blank">정렬된 이미지</a> &middot; <a href="#" data-detail="${s.scan_id}">인식 상세(확대)</a></div>` : ''}
     ${s.has_name_crop ? `<div class="imgbox crop"><img src="${img(s.scan_id, 'name_crop', 300)}" alt="이름"></div>` : ''}</div>`).join('') || '<div class="mut">없음</div>';
   renderNav('exam', D.exam);
 }

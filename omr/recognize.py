@@ -70,7 +70,7 @@ DIGIT_MARGIN_FROM, DIGIT_MARGIN_FULL = 0.7, 1.0   # ... scaled in by strength be
                                                   # never reached t_hi, 0.8-1.0 reached t_hi + 0.02, above 1.0 t_hi + 0.07)
 
 
-SOFT_FLAGS = ("serial_unreadable", "corner_hidden")   # informational: never a reason for human review
+SOFT_FLAGS = ("serial_unreadable", "corner_hidden", "guessed_answers")   # informational: never a reason for human review
 SERIAL_ABSENT_RATIO = 0.65            # darkest/brightest serial cell above this = nothing printed
 
 
@@ -88,20 +88,27 @@ class QuestionResult:
     confidence: float          # 0..1
     ambiguous: bool            # a close call: a human should look
     scores: List[float]        # darkness per choice (0 = paper, 1 = black)
+    guess: Optional[int] = None  # best-guess choice of an UNCERTAIN row (always together with ambiguous); None = confident / no choice stands out
+    guessed: bool = False      # the row's value is a best guess (== guess is not None); a human should look
 
     @property
     def answer(self) -> Optional[int]:
-        return self.marked[0] if self.state == "single" else None
+        """The row's value: the single mark, or - for an uncertain blank row - the best guess.
+        A clearly blank row and a multi-mark row (its answer is the whole `marked` set) stay None."""
+        if self.state == "single":
+            return self.marked[0]
+        return self.guess
 
 
 @dataclass
 class DigitResult:
     index: int
     state: str
-    value: Optional[int]       # None unless the digit is read unambiguously
+    value: Optional[int]       # the digit; for an uncertain column the best guess (guessed=True); None = clearly blank / nothing stands out
     confidence: float
     ambiguous: bool
     scores: List[float]
+    guessed: bool = False      # value is a best guess, not a confident read (always ambiguous)
 
 
 @dataclass
@@ -135,9 +142,17 @@ class RecognitionResult:
     dewarp: Optional[object] = None        # omr.tracks.Field: page mm -> displacement in the homography canvas (None = flat sheet)
 
     @property
+    def id_guessed(self) -> bool:
+        return "id_guessed" in self.flags
+
+    @property
+    def subject_guessed(self) -> bool:
+        return "subject_guessed" in self.flags
+
+    @property
     def needs_review(self) -> bool:
         return (self.status == OK and (self.student_id is None or self.subject is None or bool(hard_flags(self.flags))
-                or any(a.ambiguous or a.state != "single" for a in self.answers)))
+                or any(a.ambiguous or a.guessed or a.state != "single" for a in self.answers)))
 
     def image_points(self, pts_mm) -> np.ndarray:
         """Map layout mm coordinates (page space) to source-image pixels (for overlays)."""
@@ -166,6 +181,8 @@ class RecognitionResult:
             return v
         d = {k: conv(getattr(self, k)) for k in self.__dataclass_fields__ if k not in ("warped", "name_crop", "raw", "dewarp")}
         d["needs_review"] = self.needs_review
+        d["id_guessed"], d["subject_guessed"] = self.id_guessed, self.subject_guessed
+        d["guessed_answers"] = sum(1 for a in self.answers if a.guessed)
         return d
 
 
@@ -878,17 +895,52 @@ class PageDecision:
     subject: Optional[str]            # "" when the form has no subject code, None when not readable
 
 
+GUESS_GAP = 0.15            # best guess: the fullest bubble leads the runner-up by at least this much fill (and reaches t_lo) ...
+GUESS_REL_GAP = 0.10        # ... or (faint ink) its disc darkness exceeds the others' median by REL_MARGIN and the runner-up's excess by this much
+
+
+def _guess(f: np.ndarray, strength: np.ndarray, c: _Calib, md: Optional[np.ndarray] = None) -> Optional[int]:
+    """Most plausible choice of an UNCERTAIN row, or None when no choice stands out (then the row stays without a value).
+    Used only for rows that are already flagged: a clearly blank row never gets a guess.  Unknowable bubbles (the
+    UNRELIABLE sentinel of `_fill`) are never picked - their value is invented, not measured."""
+    ok = ~((f == UNRELIABLE_FILL) & (strength == UNRELIABLE_STRENGTH))
+    if f.size >= 2 and ok.sum() >= 1:
+        cand = np.nonzero(ok)[0]
+        order = cand[np.argsort(-f[cand])]
+        top = float(f[order[0]])
+        second = float(f[order[1]]) if len(order) > 1 else 0.0
+        if top >= c.t_lo and top - second >= GUESS_GAP:
+            return int(order[0])
+    if md is not None and md.size >= 3 and not np.isnan(md).any():
+        ex = np.array([md[i] - np.median(np.delete(md, i)) for i in range(md.size)])
+        o = np.argsort(-ex)
+        if ex[o[0]] >= REL_MARGIN and ex[o[0]] - ex[o[1]] >= GUESS_REL_GAP:
+            return int(o[0])
+    return None
+
+
 def _read_digits(F, S_, cal, verified, M_=None, trust_rel=True):
-    """Digit columns (ID, subject code): strict rules; a digit is read only when unambiguous."""
+    """Digit columns (ID, subject code): strict rules.  A digit is CONFIDENT only when unambiguous; an uncertain column
+    (ambiguous, or alignment unverified) still carries its best guess (`_guess`), marked `guessed` and ambiguous.  A
+    clearly blank column, or one where nothing stands out, has no value.  Returns (digits, value string or None,
+    why-not-read flag or None, any digit guessed): with every digit valued the string is produced even when some digits
+    are guessed (the caller flags it)."""
     digits = []
     for di, (f, st) in enumerate(zip(F, S_)):
-        state, marked, conf, amb = _decide(f, st, cal, strict=True, md=None if M_ is None else M_[di],
-                                          trust_rel=trust_rel)
-        val = int(marked[0]) if (state == "single" and not amb and verified) else None
-        digits.append(DigitResult(di, state, val, round(conf, 3), amb, [round(float(x), 4) for x in f]))
+        md = None if M_ is None else M_[di]
+        state, marked, conf, amb = _decide(f, st, cal, strict=True, md=md, trust_rel=trust_rel)
+        val, guessed = None, False
+        if state == "single" and not amb and verified:
+            val = int(marked[0])
+        elif amb or not verified:
+            g = _guess(f, st, cal, md)       # (a leader is needed also when the rules above guessed one: two equal greys have none)
+            if g is not None and (state != "blank" or amb):
+                val, guessed, amb = g, True, True
+        digits.append(DigitResult(di, state, val, round(conf, 3), amb, [round(float(x), 4) for x in f], guessed))
+    any_guess = any(d.guessed for d in digits)
     if all(d.value is not None for d in digits):
-        return digits, "".join(str(d.value) for d in digits), None
-    return digits, None, ("blank" if all(d.state == "blank" and not d.ambiguous for d in digits) else "unreadable")
+        return digits, "".join(str(d.value) for d in digits), None, any_guess
+    return digits, None, ("blank" if all(d.state == "blank" and not d.ambiguous for d in digits) else "unreadable"), any_guess
 
 
 REL_TRUST_ROWS = 0.4        # a region is a "faint pencil region" when this share of its rows has a relative-only mark ...
@@ -957,22 +1009,35 @@ def decide_page(raw: PageRaw) -> PageDecision:
     MA = raw.MA if raw.MA is not None else [None] * len(raw.numbers)
     for n, lab, f, st, md, tr in zip(raw.numbers, raw.labels, raw.FA, raw.SA, MA, trust):
         state, marked, conf, amb = _decide(f, st, cal, md=md, trust_rel=bool(tr))
-        answers.append(QuestionResult(n, state, marked, list(lab), round(conf, 3), amb or not raw.verified,
-                                      [round(float(x), 4) for x in f]))
+        amb = bool(amb or not raw.verified)
+        guess = None
+        if amb:       # an uncertain row keeps its flag AND gets the most plausible value (a clear blank / confident row: none)
+            if state == "single":
+                guess = int(marked[0])
+            elif state == "blank":     # a multi-mark row gets NO guess: all its marks are the answer (flagged 복수마킹)
+                guess = _guess(f, st, cal, md)
+        answers.append(QuestionResult(n, state, marked, list(lab), round(conf, 3), amb,
+                                      [round(float(x), 4) for x in f], guess, guess is not None))
     FD = raw.FI if raw.FS is None else np.concatenate([raw.FI, raw.FS])
     ical = _calibrate(FD, raw.ink, default_typ=cal.typ, min_strength=raw.min_strength)
     SD = raw.SI if raw.SS is None else np.concatenate([raw.SI, raw.SS])
     MD = None if raw.MI is None else (raw.MI if raw.MS is None else np.concatenate([raw.MI, raw.MS]))
     dtrust = page_trust or _rel_trust_digits(FD, SD, MD, ical)
-    digits, student_id, why = _read_digits(raw.FI, raw.SI, ical, raw.verified, raw.MI, dtrust)
+    digits, student_id, why, gs = _read_digits(raw.FI, raw.SI, ical, raw.verified, raw.MI, dtrust)
     for d, di in zip(digits, raw.digit_index):
         d.index = di
     flags: List[str] = [] if why is None else ["id_" + why]
+    if gs and student_id is not None:
+        flags.append("id_guessed")
     sdigits, subject = [], ""
     if raw.FS is not None and len(raw.FS):
-        sdigits, subject, why = _read_digits(raw.FS, raw.SS, ical, raw.verified, raw.MS, dtrust)
+        sdigits, subject, why, gs = _read_digits(raw.FS, raw.SS, ical, raw.verified, raw.MS, dtrust)
         if why is not None:
             flags.append("subject_" + why)
+        if gs and subject is not None:
+            flags.append("subject_guessed")
+    if any(a.guessed for a in answers):
+        flags.append("guessed_answers")
     calib = {"ink": cal.ink, "typ_fill": cal.typ, "t_lo": cal.t_lo, "t_hi": cal.t_hi,
              "id_typ_fill": ical.typ, "id_t_lo": ical.t_lo, "id_t_hi": ical.t_hi,
              "ink_auto": float(raw.ink_source == "auto"), "ink_source": raw.ink_source, "ink_separation": raw.ink_separation}

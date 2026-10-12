@@ -239,3 +239,46 @@ def test_answer_key_from_scan(env):
     # clearing the key
     assert c.put(f"/api/exams/{i}/answer-key", json={"key": {}}).json()["has_key"] is False
     assert next(s for s in c.get(f"/api/exams/{i}/dashboard").json()["students"] if s["student_id"] == "111111")["score"] is None
+
+
+def test_scan_detail_endpoint(env):
+    c = env["c"]
+    sid = env["res"][0]["outcome"]["scan_id"]
+    d = c.get(f"/api/scans/{sid}/detail").json()
+    assert d["ppm"] > 0 and d["page_w"] > 0 and len(d["answers"]) == 12 and len(d["id"]) == 6
+    a = d["answers"][0]
+    assert a["q"] == 1 and len(a["centers"]) == len(a["scores"]) == 4 and "doubt" in a
+    assert all(len(p) == 2 for p in a["centers"])
+    assert c.get("/api/scans/99999/detail").status_code == 404
+
+
+def test_scan_detail_real_photo(tmp_path):
+    """A scan made from a real photo: the detail data and a crisp, non-trivial sheet image are served."""
+    photo = os.path.join(os.path.dirname(__file__), "..", "realasset", "mixed_ink_pencil_id.jpg")
+    if not os.path.exists(photo):
+        pytest.skip("no real photo")
+    import numpy as np
+    import cv2
+    app = create_app(str(tmp_path))
+    c = TestClient(app)
+    with open(photo, "rb") as f:
+        r = c.post("/api/upload", files=[("files", ("a.jpg", f.read(), "image/jpeg"))]).json()["results"][0]
+    sid = r["outcome"]["scan_id"]
+    d = c.get(f"/api/scans/{sid}/detail").json()
+    im = c.get(f"/api/scans/{sid}/image/warped")
+    assert im.status_code == 200 and im.headers["content-type"].startswith("image/") and len(im.content) > 50_000
+    arr = cv2.imdecode(np.frombuffer(im.content, np.uint8), cv2.IMREAD_UNCHANGED)
+    assert abs(arr.shape[1] / d["page_w"] - d["ppm"]) < 0.5          # canvas pixels / mm matches the centres' unit
+    assert len(d["answers"]) == 45 and len(d["id"]) == 5 and len(d["subject"]) == 2
+    xs = [p[0] for a in d["answers"] for p in a["centers"]]
+    ys = [p[1] for a in d["answers"] for p in a["centers"]]
+    assert 0 < min(xs) and max(xs) < d["page_w"] and 0 < min(ys) and max(ys) * d["ppm"] < arr.shape[0]
+
+
+def test_detail_js_shared_block_in_sync():
+    """The detail view exists twice (server static file, inlined in standalone/app.js); keep them identical."""
+    root = os.path.join(os.path.dirname(__file__), "..")
+    def block(p):
+        s = open(os.path.join(root, p), encoding="utf-8").read()
+        return s[s.index("/* OMR-DETAIL-SHARED BEGIN"):s.index("/* OMR-DETAIL-SHARED END */")]
+    assert block("app/static/detail.js") == block("standalone/app.js")

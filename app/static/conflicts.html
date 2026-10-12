@@ -9,13 +9,14 @@
 <div id="list"></div>
 </main>
 <script src="/static/common.js"></script>
+<script src="/static/detail.js"></script>
 <script>
 if (needExam()) {
 let labels = [];
 function reading(a) {
   if (!a) return '<span class="mut">-</span>';
   return esc(labelsOf(a.marked, labels)) + (a.ambiguous ? ' <span class="tag warn">애매</span>' : '') +
-         (a.state === 'multi' ? ' <span class="tag warn">복수</span>' : '');
+         (a.state === 'multi' ? ' <span class="tag warn">복수마킹</span>' : '');
 }
 function scanCard(c, s, diffs) {
   // questions in which this scan differs from the others
@@ -29,6 +30,7 @@ function scanCard(c, s, diffs) {
       <span>${s.adopted ? badge('ok', '현재 채택') : ''} <span class="tag">${esc(SOURCE_KO[s.source] || s.source)}</span></span></div>
     <div class="mut small">${fmtTime(s.created_at)} &middot; 의심 문항 ${s.n_doubtful} &middot; 신뢰도 ${(s.mean_confidence * 100).toFixed(0)}%</div>
     ${crop}<div class="imgbox">${warped}</div>
+    ${s.has_warped ? `<div class="small"><a href="#" data-detail="${s.scan_id}">인식 상세 (문제 문항 확대)</a></div>` : ''}
     <div class="row" style="margin-top:8px">
       <button data-act="adopt" data-sub="${c.id}" data-scan="${s.scan_id}">${s.adopted ? '이 스캔 유지(확정)' : '이 스캔 채택'}</button>
       <button class="secondary" data-act="other" data-sub="${c.id}" data-scan="${s.scan_id}">다른 학생</button>

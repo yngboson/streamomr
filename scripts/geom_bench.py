@@ -80,7 +80,7 @@ if __name__ == "__main__":
         g = lambda k: tot.get(k, 0)
         ts = [r["ms"] for r in ok]
         print(f"{cn:10s}{len(rows):4d}{div(len(ok), len(rows)):7.1f}{div(g('q_clear_ok'), g('q_clear')):8.2f}{div(g('q_hard_ok'), g('q_hard')):9.1f}"
-              f"{g('q_silent'):7d}{g('q_silent_clear'):7d}{g('q_total'):6d}{div(g('id_ok'), g('id_readable')):8.1f}{g('id_wrong'):8d}{g('subject_wrong'):6d}{pct(ts, 50):6.0f}{pct(ts, 95):6.0f}")
+              f"{g('q_silent'):7d}{g('q_silent_clear'):7d}{g('q_total'):6d}{div(g('id_ok'), g('id_readable')):8.1f}{g('id_wrong'):8d}{g('subject_wrong'):6d}{pct(ts, 50):6.0f}{pct(ts, 95):6.0f}  {synth.guess_line(tot)}")
     st = {}
     for r in out:
         st.setdefault(r["cond"], {}).setdefault(r["status"], 0)

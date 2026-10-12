@@ -76,7 +76,7 @@ def main():
         print(f"{cn:<10}{len(rows):>7}{div(len(ok), len(rows)):>7.1f}{ppm:>6.2f}{div(g('q_clear_ok'), g('q_clear')):>11.2f}"
               f"{g('q_silent'):>7}{g('q_total'):>7}{div(g('q_hard_flagged'), g('q_hard')):>10.1f}"
               f"{div(g('q_hard_ok'), g('q_hard')):>9.1f}{div(g('q_clear_flagged'), g('q_clear')):>9.2f}"
-              f"{g('id_wrong'):>9}{div(g('id_ok'), g('id_readable')):>9.1f}{g('subject_wrong'):>11}{div(g('subject_ok'), g('subject_total') - g('subject_none') + g('subject_missed')):>12.1f}{div(g('serial_ok'), g('serial_total')):>8.1f}{g('serial_wrong'):>8}{pct(ts, 50):>7.0f}{pct(ts, 95):>7.0f}")
+              f"{g('id_wrong'):>9}{div(g('id_ok'), g('id_readable')):>9.1f}{g('subject_wrong'):>11}{div(g('subject_ok'), g('subject_total') - g('subject_none') + g('subject_missed')):>12.1f}{div(g('serial_ok'), g('serial_total')):>8.1f}{g('serial_wrong'):>8}{pct(ts, 50):>7.0f}{pct(ts, 95):>7.0f}  {synth.guess_line(tot)}")
     print("  (* ID read% = share of readable IDs that were read; sheets with a deliberately bad ID digit must stay unread;\n   same for the subject code: 'subj wrong' must be 0, 'subj read%' = share of readable subject codes that were read)")
     # statuses of sheet frames that were not read
     from collections import Counter

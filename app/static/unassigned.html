@@ -11,6 +11,7 @@
 <datalist id="all"></datalist><datalist id="subjects"></datalist>
 </main>
 <script src="/static/common.js"></script>
+<script src="/static/detail.js"></script>
 <script>
 if (needExam()) {
 function card(s) {
@@ -22,7 +23,7 @@ function card(s) {
       <span class="tag">${esc(SOURCE_KO[s.source] || s.source)}</span></div>
     <div class="mut small">${fmtTime(s.created_at)}</div>
     ${s.has_name_crop ? `<div class="imgbox crop"><img src="${img(s.scan_id, 'name_crop', 400)}" alt="이름" loading="lazy"></div>` : ''}
-    ${s.has_warped ? `<div class="imgbox"><a href="${img(s.scan_id, 'warped', 1600)}" target="_blank"><img src="${img(s.scan_id, 'warped', 700)}" loading="lazy" alt="정렬된 시트"></a></div>` : ''}
+    ${s.has_warped ? `<div class="imgbox"><a href="${img(s.scan_id, 'warped', 1600)}" target="_blank"><img src="${img(s.scan_id, 'warped', 700)}" loading="lazy" alt="정렬된 시트"></a><div class="small"><a href="#" data-detail="${s.scan_id}">인식 상세 (확대)</a></div></div>` : ''}
     <div class="small mut">수험번호 판독 (? = 읽지 못함)</div><div class="digits">${digits}</div>
     ${sd ? `<div class="small mut">과목코드 판독</div><div class="digits">${sd}</div>` : ''}
     ${sug ? `<div class="small mut">제안 (이 페이지가 없는 학생)</div><div class="chips">${sug}</div>` : ''}

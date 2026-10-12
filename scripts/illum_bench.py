@@ -249,7 +249,7 @@ def table(out, methods, conds, title=""):
             un = 100 * np.mean([r["unrel"] for r in ok]) if ok else float("nan")
             print(f"{cn:<11}{m:<7}{len(rows):>6}{div(len(ok), len(rows)):>6.0f}{g('q_silent'):>7}{g('q_total'):>6}"
                   f"{div(g('q_clear_ok'), g('q_clear')):>9.2f}{div(g('q_clear_flagged'), g('q_clear')):>9.2f}"
-                  f"{div(g('q_hard_ok'), g('q_hard')):>9.1f}{div(g('id_ok'), g('id_readable')):>9.1f}{g('id_wrong'):>9}{un:>7.2f}{ms:>8.1f}")
+                  f"{div(g('q_hard_ok'), g('q_hard')):>9.1f}{div(g('id_ok'), g('id_readable')):>9.1f}{g('id_wrong'):>9}{un:>7.2f}{ms:>8.1f}  {synth.guess_line(tot)}")
         for m in methods:
             ii = [r["res"][m]["ink"] for r in rows if r["res"][m]["status"] == "ok" and r["res"][m].get("ink")]
             if ii:

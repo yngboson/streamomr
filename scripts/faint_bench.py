@@ -74,7 +74,7 @@ def main(argv=None):
             d = lambda a, b: 100.0 * a / b if b else float("nan")
             print(f"{cn:<13}{m:<5}{len(rows):>6}{d(len(ok), len(rows)):>5.0f}{d(g('q_clear_ok'), g('q_clear')):>10.2f}{d(sum(r['clean'] for r in [x['res'][m] for x in rows]), sum(r['clear_n'] for r in [x['res'][m] for x in rows])):>11.2f}"
                   f"{d(g('q_clear_flagged'), g('q_clear')):>9.2f}{g('q_silent'):>7}{g('q_total'):>6}{d(g('q_hard_ok'), g('q_hard')):>9.1f}"
-                  f"{d(g('id_ok'), g('id_readable')):>9.1f}{g('id_wrong'):>9}{g('subject_wrong'):>11}")
+                  f"{d(g('id_ok'), g('id_readable')):>9.1f}{g('id_wrong'):>9}{g('subject_wrong'):>11}  {synth.guess_line(t)}")
     for r in out:
         for m in MODES:
             ev = r["res"][m]["ev"]
