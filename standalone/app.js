@@ -21,7 +21,7 @@ const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'
 function subjLabel(subject) { return subject === null || subject === undefined ? '과목? 미확인' : subject === '' ? '' : '과목 ' + subject; }
 
 // ---- results list
-function addScan(s) {
+function addScan(s, detail) {
   scans.push(s);
   const ans = s.answers.map(a => a.marked || '-').join(' ');
   const li = document.createElement('li');
@@ -30,6 +30,7 @@ function addScan(s) {
   li.innerHTML = `<span><b>${esc(subjLabel(s.subject))}</b> ${s.subject === '' ? '' : '&middot;'} <b>${esc(s.student_id ?? '(번호 없음)')}</b> &middot; ${s.page + 1}${s.total_pages ? '/' + s.total_pages : ''}페이지` +
     (s.needs_review ? ' <span class="badge needs_review">확인 필요</span>' : '') + flags + `</span>` +
     `<span class="mut small" style="word-break:break-all">${esc(ans)}</span>`;
+  if (detail && detail.img) { li.onclick = () => showDetail(s, detail); li.title = '탭하면 인식 상세'; li.innerHTML += '<span class="mut small">탭하여 인식 상세 보기 &rsaquo;</span>'; }
   $('recent').prepend(li);
   $('count').textContent = scans.length + '건'; $('csv').disabled = false;
 }
@@ -50,6 +51,84 @@ $('csv').onclick = () => {
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 };
 $('reset').onclick = () => { if (worker) worker.postMessage({ type: 'reset' }); };
+
+// ---- per-scan detail: the rectified sheet cropped around each question, with the doubtful choices marked
+const D_COL = { on: '#2ecc71', bad: '#ff5252', doubt: '#f5a524', off: 'rgba(120,120,120,.7)' };
+const cl = n => '①②③④⑤⑥⑦⑧⑨'[n] || String(n + 1);
+// per-choice verdict: on = counted as marked, bad = counted wrongly (multi) / doubtful, doubt = grey zone, off = empty
+function verdicts(r, lo, hi, kind) {
+  const marked = kind === 'q' ? r.marked : (r.state === 'blank' ? [] : r.scores.map((v, i) => i).filter(i => r.scores[i] === Math.max(...r.scores) && r.scores[i] >= lo));
+  return r.scores.map((v, i) => {
+    const isMarked = marked.includes(i);
+    if (r.state === 'multi' && isMarked) return 'bad';
+    if (isMarked) return r.doubt || v < hi ? 'doubt' : 'on';
+    return v >= lo && v < hi && r.state !== 'blank' ? 'doubt' : (v >= lo && r.doubt ? 'doubt' : 'off');
+  });
+}
+function rowStatus(r) {
+  if (r.state === 'multi') return ['bad', '복수 마킹'];
+  if (r.state === 'blank' && r.doubt) return ['doubt', '애매 (옅은 마킹?)'];
+  if (r.state === 'blank') return ['doubt', '공란'];
+  if (r.doubt) return ['doubt', '애매'];
+  return ['', '정상'];
+}
+function cropRow(img, d, centers, vs, rMM, extraLeft) {
+  const ppm = d.ppm, xs = centers.map(c => c[0]), ys = centers.map(c => c[1]);
+  const x0 = Math.min(...xs) - rMM - extraLeft, x1 = Math.max(...xs) + rMM + 2, y0 = Math.min(...ys) - rMM - 1.2, y1 = Math.max(...ys) + rMM + 1.2;
+  const sw = (x1 - x0) * ppm, sh = (y1 - y0) * ppm, scale = Math.min(2.2, 540 / sw);
+  const cv = document.createElement('canvas'); cv.width = Math.round(sw * scale); cv.height = Math.round(sh * scale);
+  const c = cv.getContext('2d'); c.drawImage(img, x0 * ppm, y0 * ppm, sw, sh, 0, 0, cv.width, cv.height);
+  centers.forEach(([x, y], i) => {
+    const px = (x - x0) * ppm * scale, py = (y - y0) * ppm * scale;
+    c.lineWidth = vs[i] === 'off' ? 1.5 : 3.5; c.strokeStyle = D_COL[vs[i]];
+    c.beginPath(); c.arc(px, py, rMM * ppm * scale * 1.25, 0, 6.2832); c.stroke();
+  });
+  return cv;
+}
+function chipsFor(r, vs, kind) {
+  return '<div class="chips">' + r.scores.map((v, i) => `<span class="chip ${vs[i] === 'off' ? '' : vs[i]}">${kind === 'q' ? esc(r.labels[i] ?? cl(i)) : i} &middot; ${Math.round(v * 100)}%</span>`).join('') + '</div>';
+}
+function showDetail(s, d) {
+  const img = new Image();
+  img.onload = () => renderDetail(s, d, img);
+  img.src = 'data:image/jpeg;base64,' + d.img;
+}
+function renderDetail(s, d, img) {
+  $('dtitle').textContent = `${subjLabel(s.subject)} ${s.student_id ?? '(번호 없음)'} · ${s.page + 1}페이지`;
+  const body = $('dbody'); body.innerHTML = '';
+  const only = $('donly').checked;
+  const build = () => {
+    body.innerHTML = '';
+    const sect = (title, rows, kind, lo, hi) => {
+      let shown = 0;
+      const wrap = document.createElement('div'); wrap.innerHTML = `<b>${title}</b>`;
+      rows.forEach((r, idx) => {
+        if (!r.centers.length) return;
+        const [cls, txt] = rowStatus(r);
+        if ($('donly').checked && !cls) return;
+        shown++;
+        const vs = verdicts(r, lo, hi, kind);
+        const rMM = Math.min(...r.centers.slice(1).map((c, i) => Math.hypot(c[0] - r.centers[i][0], c[1] - r.centers[i][1])), 8) * 0.38;
+        const box = document.createElement('div'); box.className = 'qrow ' + cls;
+        const name = kind === 'q' ? `${r.q}번` : `${kind === 'id' ? '학번' : '과목'} ${idx + 1}번째 자리`;
+        box.innerHTML = `<b>${name}</b> <span class="${cls === 'bad' ? 'err' : 'mut'}">${txt}</span>`;
+        box.appendChild(cropRow(img, d, r.centers, vs, rMM, kind === 'q' ? 6 : 1));
+        box.insertAdjacentHTML('beforeend', chipsFor(r, vs, kind));
+        wrap.appendChild(box);
+      });
+      if (!shown) wrap.insertAdjacentHTML('beforeend', `<div class="mut small">${$('donly').checked ? '문제 없음' : '데이터 없음'}</div>`);
+      body.appendChild(wrap);
+    };
+    sect('문항', d.answers, 'q', d.t_lo ?? 0.2, d.t_hi ?? 0.5);
+    if (d.id.length) sect('학번', d.id, 'id', d.id_t_lo ?? d.t_lo ?? 0.2, d.id_t_hi ?? d.t_hi ?? 0.5);
+    if (d.subject.length) sect('과목 코드', d.subject, 'subject', d.id_t_lo ?? d.t_lo ?? 0.2, d.id_t_hi ?? d.t_hi ?? 0.5);
+    if (s.flags.length) body.insertAdjacentHTML('afterbegin', `<div class="small" style="margin:6px 0">플래그: <span class="tag warn">${esc(s.flags.join(', '))}</span></div>`);
+  };
+  $('donly').onchange = build; build();
+  $('detail').hidden = false;
+}
+$('dclose').onclick = () => { $('detail').hidden = true; };
+$('detail').onclick = ev => { if (ev.target === $('detail')) $('detail').hidden = true; };
 
 // ---- overlay (same drawing as the server-based scanner)
 function draw() {
@@ -123,7 +202,7 @@ function onResult(e, wms) {
   mm.textContent = ms.length ? '놓친 시트 있음: ' + ms.map(m => (m.serial ? 'No. ' + String(m.serial).padStart(4, '0') : '번호 없음 ' + (m.student_id || '?')) + ` (${m.page + 1}페이지)` + (m.possibly_same_as ? ` - ${m.possibly_same_as}와 같은 시트일 수 있음` : '')).join(', ') + ' - 다시 보여 주세요' : '';
   if (e.commit) {
     const s = e.commit.summary; s.time = new Date().toISOString();
-    beep(); flash(); addScan(s);
+    beep(); flash(); addScan(s, e.commit.detail);
     $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}`;
     if (navigator.vibrate) navigator.vibrate(60);
   }

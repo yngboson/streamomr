@@ -6,6 +6,7 @@ summarised, the caller keeps the results in memory), no JPEG round trip (the bro
 and no legacy-form lookup (resolve_layout=None: sheets describe themselves in their header).
 Keep it in sync with app/main.py::_frame_step when that changes.
 """
+import base64
 import json
 import time
 
@@ -42,6 +43,30 @@ def summarize(result) -> dict:
                          "doubt": bool(a.ambiguous)} for a in result.answers]}
 
 
+def _digit_rows(digits, centers):
+    return [{"state": d.state, "value": d.value, "doubt": bool(d.ambiguous), "scores": d.scores,
+             "centers": centers[i]} for i, d in enumerate(digits) if i < len(centers)]
+
+
+def detail(result) -> dict:
+    """What the review view needs to show *where* a sheet is doubtful: the canonical (rectified) sheet as a JPEG
+    plus, per question / ID digit / subject digit, the bubble centres (mm), fill scores and the decision."""
+    if result.warped is None:
+        return {}
+    ok, jpg = cv2.imencode(".jpg", result.warped, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if not ok:
+        return {}
+    bc, cal = result.bubble_centers_mm or {}, result.calibration or {}
+    ans = bc.get("answers", [])
+    return {"img": base64.b64encode(jpg.tobytes()).decode("ascii"), "ppm": result.px_per_mm,
+            "t_lo": cal.get("t_lo"), "t_hi": cal.get("t_hi"), "id_t_lo": cal.get("id_t_lo"), "id_t_hi": cal.get("id_t_hi"),
+            "answers": [{"q": a.number, "state": a.state, "marked": list(a.marked), "labels": list(a.labels),
+                         "scores": a.scores, "doubt": bool(a.ambiguous), "centers": ans[i]}
+                        for i, a in enumerate(result.answers) if i < len(ans)],
+            "id": _digit_rows(result.id_digits, bc.get("id", [])),
+            "subject": _digit_rows(result.subject_digits, bc.get("subject", []))}
+
+
 class Scanner:
     def __init__(self):
         self.session = StreamSession(resolve_layout=None)
@@ -72,7 +97,7 @@ class Scanner:
         ev["w"], ev["h"] = int(img.shape[1]), int(img.shape[0])
         commit = ev.pop("commit", None)
         if commit is not None:
-            ev["commit"] = {"summary": summarize(commit["result"]), "frames": commit["frames"]}
+            ev["commit"] = {"summary": summarize(commit["result"]), "frames": commit["frames"], "detail": detail(commit["result"])}
         missed = session.missed()
         if missed:
             ev["missed"] = missed
