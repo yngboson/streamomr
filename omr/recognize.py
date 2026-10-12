@@ -25,7 +25,7 @@ from . import ink as inkmod
 from . import layout as lay
 from . import markers as mk
 from . import tracks as trk
-from .detect import find_markers
+from .detect import find_markers, find_markers_scaled
 
 DEFAULT_PX_PER_MM = 6.0
 
@@ -328,8 +328,8 @@ HEADER_FLIP_MARGIN = 0.3     # ... only when they are this close to the threshol
 def _box_mean(ii, x0, y0, x1, y1) -> float:
     """Mean of the canvas over [x0, x1) x [y0, y1) (px, clipped) from an integral image."""
     H, W = ii.shape[0] - 1, ii.shape[1] - 1
-    x0, x1 = int(np.clip(round(x0), 0, W - 1)), int(np.clip(round(x1), 1, W))
-    y0, y1 = int(np.clip(round(y0), 0, H - 1)), int(np.clip(round(y1), 1, H))
+    x0, x1 = min(max(round(x0), 0), W - 1), min(max(round(x1), 1), W)      # plain ints: np.clip per call dominated the header read
+    y0, y1 = min(max(round(y0), 0), H - 1), min(max(round(y1), 1), H)
     x1, y1 = max(x1, x0 + 1), max(y1, y0 + 1)
     return float((ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]) / ((x1 - x0) * (y1 - y0)))
 
@@ -630,7 +630,10 @@ def _fit_alignment(warped, groups, ppm, extrapolated=False, strict=False, diag=N
     info["align_used"] = int(keep.sum())
     info["align_inlier_frac"] = float(keep.mean())
     info["align_max_shift_mm"] = float(np.linalg.norm(A @ coef, axis=1).max())
-    if info["align_max_shift_mm"] > (ALIGN_MAX_SHIFT_EXTRAP_MM if extrapolated else ALIGN_MAX_SHIFT_MM):
+    # a page straightened by its tracks may still be off by a few mm in the interior (a crease through the middle is where an
+    # edge-only field cannot be exact): the larger shift is accepted when the rings back the model over (almost) the whole page
+    wide = extrapolated or (strict and info["align_inlier_frac"] >= ALIGN_MIN_COVERAGE)
+    if info["align_max_shift_mm"] > (ALIGN_MAX_SHIFT_EXTRAP_MM if wide else ALIGN_MAX_SHIFT_MM):
         return None, info
     if extrapolated and info["align_inlier_frac"] < ALIGN_MIN_COVERAGE:
         return None, info      # rings not confirmed over the extrapolated part of the page: do not trust it
@@ -957,7 +960,7 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
 
     # ---- 1. markers
     t0 = time.perf_counter()
-    found, dup, dinfo = find_markers(gray)
+    found, dup, dinfo = find_markers_scaled(gray)
     lap("detect", t0)
     res = RecognitionResult(status=NO_SHEET, px_per_mm=px_per_mm)
     if not found:
@@ -1037,6 +1040,9 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
         if np.mean([np.linalg.norm(quad[(k + 1) % 4] - quad[k]) for k in range(4)]) < FOREIGN_MIN_SIDE_FRAC * lay.MARKER_MM:
             continue                     # far smaller than a corner marker, yet inside the sheet: a pattern in the print, not a marker
         ctr = quad.mean(0)
+        if any(np.linalg.norm(ctr - cv2.perspectiveTransform(c.reshape(-1, 1, 2), Hm).reshape(4, 2).mean(0) / px_per_mm) < lay.MARKER_MM
+               for c in found.values()):
+            continue                     # overlaps a marker of this page: two markers cannot share a spot, it is a mis-decode of that marker's surroundings
         if -FOREIGN_MARGIN_MM <= ctr[0] <= lay.PAGE_W + FOREIGN_MARGIN_MM and -FOREIGN_MARGIN_MM <= ctr[1] <= lay.PAGE_H + FOREIGN_MARGIN_MM:
             res.status = INCONSISTENT
             res.flags.append("mixed_page_markers")

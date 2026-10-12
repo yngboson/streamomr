@@ -49,6 +49,11 @@ RING_MODULES = 0.6                       # white model ring: this far outside th
 MIN_FOR_STOP = 3                         # markers of one page group that end the search early
 SAME_PLACE = 0.35                        # same id counts as the same detection if centres are within this * marker side
 
+COMPLETE_ROI = 1.3                       # missing-corner search window half-size / predicted marker side
+COMPLETE_MAX_OFF = 0.9                   # a found marker must lie within this * side of where the other three predict it
+COMPLETE_KERNELS = (0.85, 0.55, 0.35)    # opening kernels (of a module) tried there: a marker turned ~45 deg has only ~0.7 module of straight white
+COMPLETE_SIDE = (0.6, 1.6)               # blob quad side / predicted side
+
 FLAT_BG_FRAC = 1 / 10                    # lighting-flattened last-resort pass: background = max filter of this fraction of the short side ...
 FLAT_MIN_CANDIDATES = 4                  # ... and the plain pass rejected at least this many marker-like quads
 FLAT_SCALE = 8                           # ... measured on a copy this much smaller
@@ -212,6 +217,77 @@ def flatten_lighting(gray: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(flat, (0, 0), FLAT_DENOISE_SIGMA).astype(np.uint8)
 
 
+def _blob_quads(img: np.ndarray, pred_side: float, pred_c: np.ndarray):
+    """Dark blobs of a local window that are convex quadrilaterals of about the predicted size and place.
+
+    ArUco's candidate search needs a clean closed contour; a blurred, streaked marker may not give one although a plain Otsu
+    blob of the same marker is a perfectly good quad (model_decode then reads it).  Only used where a marker is expected."""
+    _, b = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    cs, _ = cv2.findContours(b, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for c in cs:
+        if cv2.contourArea(c) < (COMPLETE_SIDE[0] * pred_side) ** 2 * 0.5:
+            continue
+        ap = cv2.approxPolyDP(c, 0.04 * cv2.arcLength(c, True), True).reshape(-1, 2)
+        if len(ap) != 4 or not cv2.isContourConvex(ap.reshape(-1, 1, 2)):
+            continue
+        q = ap.astype(np.float64)
+        if COMPLETE_SIDE[0] * pred_side <= _side(q) <= COMPLETE_SIDE[1] * pred_side and np.linalg.norm(q.mean(0) - pred_c) < COMPLETE_MAX_OFF * pred_side:
+            yield q
+
+
+def _complete(m: "_Merge", gray: np.ndarray) -> int:
+    """A page with exactly three markers found: look for the fourth where the three predict it (their layout is known).
+
+    The early stop at three markers (plain/opened passes over the whole frame) leaves a visible fourth marker undetected when
+    its own contour was broken (streaks, blur, rotation) -> `corner_hidden`.  The search is a small window, so it is cheap
+    and uses passes the whole-frame search cannot afford (several kernels, blob quads).  Returns detector runs used."""
+    groups: Dict[int, List[int]] = {}
+    for i in m.found:
+        groups.setdefault(i // 4, []).append(i)
+    page = next((g for g, v in groups.items() if len(v) == 3), None)
+    if page is None:
+        return 0
+    miss = next(i for i in range(4 * page, 4 * page + 4) if i not in m.found)
+    mm = {mk.marker_id(page, c): np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], np.float64)
+          for c, (x, y, w, h) in lay.marker_rects(page).items()}
+    ids = sorted(groups[page])
+    H, _ = cv2.findHomography(np.concatenate([mm[i] for i in ids]), np.concatenate([m.found[i] for i in ids]), 0)
+    if H is None or not np.isfinite(H).all():
+        return 0
+    pq = cv2.perspectiveTransform(mm[miss].reshape(-1, 1, 2), H).reshape(4, 2)
+    side, ctr = _side(pq), pq.mean(0)
+    if not (np.isfinite(pq).all() and side > 0):
+        return 0
+    h, w = gray.shape[:2]
+    x0, y0 = np.maximum((ctr - COMPLETE_ROI * side).astype(int), 0)
+    x1, y1 = np.minimum((ctr + COMPLETE_ROI * side).astype(int), [w, h])
+    if x1 - x0 < side * 0.5 or y1 - y0 < side * 0.5:
+        return 0                                       # the predicted marker lies outside the frame
+    roi, off = gray[y0:y1, x0:x1], np.array([x0, y0], np.float64)
+    local = _Merge()
+    det, runs = _detector(), 0
+    for frac in (0.0,) + COMPLETE_KERNELS:
+        img = roi if frac == 0.0 else cv2.morphologyEx(roi, cv2.MORPH_OPEN, np.ones((_kernel(side / 6.0, frac),) * 2, np.uint8))
+        c2, i2, rej = det.detectMarkers(img)
+        runs += 1
+        local.add(c2, i2)
+        if miss not in local.found:
+            _redecode(local, roi, (roi, img), rej, side * COMPLETE_SIDE[0])
+        if miss not in local.found:
+            for q in _blob_quads(img, side, ctr - off):
+                out = model_decode(img, q)
+                if out is not None and out[0] == miss:
+                    local.add([out[1].reshape(1, 4, 2)], np.array([[miss]]))
+                    break
+        if miss in local.found:
+            q = local.found[miss] + off
+            if np.linalg.norm(q.mean(0) - ctr) < COMPLETE_MAX_OFF * side:
+                m.add([q.reshape(1, 4, 2)], np.array([[miss]]))
+                break
+            local.found.pop(miss)
+    return runs
+
+
 def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:
     """-> (id -> 4x2 corners (TL, TR, BR, BL), duplicate/inconsistent id seen, info).
 
@@ -263,4 +339,29 @@ def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[st
             passes += 1
         if m.solid():
             used = -1
+    passes += _complete(m, gray)
     return m.found, m.dup, {"detect_passes": float(passes), "detect_kernel": float(used)}
+
+
+# ---------------------------------------------------------------- resolution-aware detection
+DETECT_LONG_SIDE = 1920                  # frames larger than this are searched on an INTER_AREA copy, corners refined at full size
+
+
+def find_markers_scaled(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:
+    """find_markers, but on a copy whose long side is DETECT_LONG_SIDE when the frame is larger (24 MP photos);
+    the corners are mapped back and sub-pixel refined on the full-size image. Frames up to that size run unchanged."""
+    h, w = gray.shape[:2]
+    s = DETECT_LONG_SIDE / max(h, w)
+    if s >= 1.0:
+        return find_markers(gray)
+    small = cv2.resize(gray, (max(int(round(w * s)), 1), max(int(round(h * s)), 1)), interpolation=cv2.INTER_AREA)
+    found, dup, info = find_markers(small)
+    sx, sy = w / small.shape[1], h / small.shape[0]
+    out = {}
+    for i, c in found.items():
+        p = ((c + 0.5) * (sx, sy) - 0.5).astype(np.float32)      # pixel-centre convention
+        win = max(2, int(round(0.3 * _side(p) / 6)))             # 0.3 module, as the detector's own refinement
+        p = cv2.cornerSubPix(gray, p.reshape(-1, 1, 2), (win, win), (-1, -1), _SUBPIX).reshape(4, 2)
+        out[i] = p.astype(np.float64)
+    info["detect_scale"] = float(s)
+    return out, dup, info
