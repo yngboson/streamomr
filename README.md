@@ -4,6 +4,8 @@
 
 **🔗 라이브 데모 (GitHub Pages): https://yngboson.github.io/streamomr/**
 
+<img src="docs/res1.jpg" width="360" alt="아이폰에서 스캔한 결과 화면 예시">
+
 ## 에이전트 핸드오프 / 작업 로그
 다음 에이전트는 여기부터 읽을 것. 새 작업은 아래 로그 맨 위에 추가.
 
