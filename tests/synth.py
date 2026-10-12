@@ -1012,3 +1012,44 @@ def make_frame_faint(layout: Layout, pdf_path: str, cond: Cond, rng, **kw):
 
 
 CONDS.update(FOLD_CONDS)     # registered last: the seeds of the other conditions (enumerate order) stay as they were
+
+
+# ================================================================= mixed marking instruments (pencil vs pen on one sheet)
+# gray levels: dark sign pen 20-50, pencil / dying pen 105-150 (darkness 0.41-0.59 of paper); the faint-graphite
+# conditions above (darkness 0.13-0.24) are a different problem (glare, relative rule).
+PEN_GRAY, PENCIL_GRAY = (20, 50), (105, 150)
+MIXED_CONDS = {   # name -> (section id/subject instrument, answers instrument): pen | pencil | half (columns: left dark, right faint) | rand (per mark)
+    "mix_pencil_id": ("pencil", "pen"),
+    "mix_pen_id": ("pen", "pencil"),
+    "mix_half_pen": ("pen", "half"),
+    "mix_rand_pen": ("pen", "rand"),
+}
+for _n in MIXED_CONDS:
+    CONDS[_n] = Cond(_n, frame=(1080, 1920), tilt=15, rot="upright", hard_rate=0.1, curl=(0, 4))
+
+
+def make_frame_mixed(layout: Layout, pdf_path: str, cond: Cond, rng, **kw):
+    """make_frame where every `fill` mark takes the gray of its section's instrument (MIXED_CONDS)."""
+    global draw_ink
+    orig = draw_ink
+    id_inst, ans_inst = MIXED_CONDS[cond.name]
+    pg = layout.pages[0]
+    r_ans = pg.bubble_diameter / 2
+    xs = sorted(b.cx for col in pg.columns for q in col.questions for b in q.bubbles)
+    x_mid = xs[len(xs) // 2]
+
+    def mixed_ink(img, cx_mm, cy_mm, R_mm, rng_, kind, **k):
+        if kind == "fill" and "gray" not in k:
+            inst = ans_inst if abs(R_mm - r_ans) < 1e-6 else id_inst
+            if inst == "half":
+                inst = "pen" if cx_mm < x_mid else "pencil"
+            elif inst == "rand":
+                inst = "pen" if rng_.random() < 0.5 else "pencil"
+            k["gray"] = rng_.uniform(*(PEN_GRAY if inst == "pen" else PENCIL_GRAY))
+        return orig(img, cx_mm, cy_mm, R_mm, rng_, kind, **k)
+
+    draw_ink = mixed_ink
+    try:
+        return make_frame(layout, pdf_path, cond, rng, **kw)
+    finally:
+        draw_ink = orig

@@ -30,7 +30,8 @@ def run_job(args):
     L, pdf = assets[name]
     rng = np.random.default_rng(seed)
     serial = 1 + seed % synth.mk_serial_max()
-    mk = synth.make_frame_faint if cond_name in synth.FAINT_CONDS else synth.make_frame
+    mk = (synth.make_frame_faint if cond_name in synth.FAINT_CONDS else
+          synth.make_frame_mixed if cond_name in synth.MIXED_CONDS else synth.make_frame)
     frame, truth = mk(L, pdf, synth.CONDS[cond_name], rng, mode="sheet", serial=serial)
     out = {"cond": cond_name, "res": {}}
     for m, v in MODES.items():

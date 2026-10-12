@@ -723,9 +723,13 @@ def _fill(D: np.ndarray, ink: float, unreliable: Optional[np.ndarray] = None):
                faint residue.
     strength : mean darkness of the inked pixels relative to the page's ink level.  A uniformly grey bubble
                (smudge, erased ghost) has full "fill" but low strength."""
+    ink = np.asarray(ink, np.float32)
+    if ink.ndim:                    # one level per bubble (omr.ink.local_levels)
+        ink = ink[:, None]
     fill = np.clip((D - 0.35 * ink) / (0.3 * ink), 0, 1)
     m = D >= 0.35 * ink
-    strength = (D * m).sum(axis=1) / np.maximum(m.sum(axis=1), 1) / ink
+    strength = (D * m).sum(axis=1) / np.maximum(m.sum(axis=1), 1) / ink[..., 0] if ink.ndim else \
+        (D * m).sum(axis=1) / np.maximum(m.sum(axis=1), 1) / ink
     fill = fill.mean(axis=1)
     if unreliable is not None and unreliable.any():
         # A bubble whose darkness cannot be known (shadow edge across it, glare) is flagged, not guessed: with
@@ -887,29 +891,61 @@ def _read_digits(F, S_, cal, verified, M_=None, trust_rel=True):
     return digits, None, ("blank" if all(d.state == "blank" and not d.ambiguous for d in digits) else "unreadable")
 
 
-REL_TRUST_ROWS = 0.4        # a page is a "faint pencil page" when this share of its questions has a relative-only mark ...
-REL_TRUST_GHOSTS = 0.02     # ... and (almost) no other-choice beside a confident mark is as dark (erasure ghost / stray evidence), per question
+REL_TRUST_ROWS = 0.4        # a region is a "faint pencil region" when this share of its rows has a relative-only mark ...
+REL_TRUST_GHOSTS = 0.02     # ... and (almost) no other-choice beside a confident mark is as dark (erasure ghost / stray evidence), per row
+REL_TRUST_WINDOW = 7        # answers: the region of a question = the questions within this many places before / after it
+REL_STRONG = 0.30           # a region (not the whole page) is trusted on marks at least this much darker than their row (excess; erasure ghosts measured <= 0.25)
+REL_TRUST_MIN_DIGITS = 3    # ID / subject block: at least this many digit columns with a relative-only mark
 
 
-def _rel_page_trust(raw: PageRaw, cal: _Calib) -> bool:
-    """Does the page itself say that relative-only marks are marks rather than erasure ghosts?  A faint graphite mark and
-    the ghost of an erased one look alike (both ~15-25 % darker than paper, evenly), so the relative rule applies
-    only on a page where (a) a large share of the questions has such a mark and nothing else explains them -
-    the whole sheet is written in faint pencil - and (b) the confidently marked questions show no ghosts beside their
-    marks.  On any other page the relative rule is OFF (measured: on ordinary sheets with erasures it turned ghosts into
-    flagged guesses / silent reads and cost ID read-rate)."""
-    if raw.MA is None or not len(raw.numbers):
-        return False
-    rel_rows = ghosts = 0
-    for f, st, md in zip(raw.FA, raw.SA, raw.MA):
-        state, marked, conf, amb, confident = _decide_abs(f, st, cal)
-        rel, _ = _relative_marks(md, False)
+def _rel_evidence(F, S_, M_, cal, strict):
+    """Per row: (has a relative-only mark, the same with excess >= REL_STRONG, ghost-like other choices beside a confident mark)."""
+    rel_only = np.zeros(len(F), bool)
+    strong = np.zeros(len(F), bool)
+    ghosts = np.zeros(len(F), int)
+    for i, (f, st, md) in enumerate(zip(F, S_, M_)):
+        state, marked, conf, amb, confident = _decide_abs(f, st, cal, strict)
+        rel, ex = _relative_marks(md, strict)
         if confident:
-            ghosts += len([i for i in rel if i not in marked])
+            ghosts[i] = len([j for j in rel if j not in marked])
         elif rel:
-            rel_rows += 1
+            rel_only[i] = True
+            strong[i] = bool(ex.min() >= REL_STRONG)
+    return rel_only, strong, ghosts
+
+
+def _rel_trust_answers(raw: PageRaw, cal: _Calib):
+    """Per question: does the page, or ITS REGION, say that relative-only marks are marks rather than erasure ghosts?  A faint
+    graphite mark and the ghost of an erased one look alike (both ~15-25 % darker than paper, evenly), so the relative rule
+    applies only where (a) a large share of the questions has such a mark and nothing else explains them - the sheet is
+    written in faint ink, or lit by glare - and (b) the confidently marked questions show no ghosts beside their marks.
+    Elsewhere the rule is OFF (measured: on ordinary sheets with erasures it turned ghosts into flagged guesses / silent
+    reads and cost ID read-rate).  Two scopes: the whole page (>= REL_TRUST_ROWS of all questions: faint graphite throughout), or a
+    sliding window of neighbouring questions where the relative marks are STRONG (>= REL_STRONG, darker than any ghost): a sheet
+    written half in faint pen / half in dark pen gets the rule where it is needed; a window is small and ghost-only rows can
+    fill it by chance, hence the stronger evidence required."""
     n = len(raw.numbers)
-    return rel_rows >= REL_TRUST_ROWS * n and ghosts <= REL_TRUST_GHOSTS * n
+    if raw.MA is None or not n:
+        return np.zeros(n, bool), False
+    rel_only, strong, ghosts = _rel_evidence(raw.FA, raw.SA, raw.MA, cal, False)
+    if rel_only.sum() >= REL_TRUST_ROWS * n and ghosts.sum() <= REL_TRUST_GHOSTS * n:
+        return np.ones(n, bool), True
+    out = np.zeros(n, bool)
+    for i in range(n):
+        lo, hi = max(0, i - REL_TRUST_WINDOW), min(n, i + REL_TRUST_WINDOW + 1)
+        m = hi - lo
+        out[i] = strong[lo:hi].sum() >= REL_TRUST_ROWS * m and ghosts[lo:hi].sum() <= REL_TRUST_GHOSTS * m
+    return out, False
+
+
+def _rel_trust_digits(F, S_, M_, cal) -> bool:
+    """The same for the ID + subject block as one region (strict digit rules): written in pencil next to a pen-written
+    answer area, the block has its own evidence - most of its columns hold a relative-only mark and none shows a ghost."""
+    if M_ is None or not len(F):
+        return False
+    rel_only, strong, ghosts = _rel_evidence(F, S_, M_, cal, True)
+    n = len(F)
+    return bool(strong.sum() >= max(REL_TRUST_MIN_DIGITS, REL_TRUST_ROWS * n) and ghosts.sum() <= REL_TRUST_GHOSTS * n)
 
 
 def decide_page(raw: PageRaw) -> PageDecision:
@@ -917,21 +953,24 @@ def decide_page(raw: PageRaw) -> PageDecision:
     track-fused measurements by `omr.fusion`."""
     cal = _calibrate(raw.FA, raw.ink, min_strength=raw.min_strength)
     answers = []
-    trust = _rel_page_trust(raw, cal)
+    trust, page_trust = _rel_trust_answers(raw, cal)
     MA = raw.MA if raw.MA is not None else [None] * len(raw.numbers)
-    for n, lab, f, st, md in zip(raw.numbers, raw.labels, raw.FA, raw.SA, MA):
-        state, marked, conf, amb = _decide(f, st, cal, md=md, trust_rel=trust)
+    for n, lab, f, st, md, tr in zip(raw.numbers, raw.labels, raw.FA, raw.SA, MA, trust):
+        state, marked, conf, amb = _decide(f, st, cal, md=md, trust_rel=bool(tr))
         answers.append(QuestionResult(n, state, marked, list(lab), round(conf, 3), amb or not raw.verified,
                                       [round(float(x), 4) for x in f]))
     FD = raw.FI if raw.FS is None else np.concatenate([raw.FI, raw.FS])
     ical = _calibrate(FD, raw.ink, default_typ=cal.typ, min_strength=raw.min_strength)
-    digits, student_id, why = _read_digits(raw.FI, raw.SI, ical, raw.verified, raw.MI, trust)
+    SD = raw.SI if raw.SS is None else np.concatenate([raw.SI, raw.SS])
+    MD = None if raw.MI is None else (raw.MI if raw.MS is None else np.concatenate([raw.MI, raw.MS]))
+    dtrust = page_trust or _rel_trust_digits(FD, SD, MD, ical)
+    digits, student_id, why = _read_digits(raw.FI, raw.SI, ical, raw.verified, raw.MI, dtrust)
     for d, di in zip(digits, raw.digit_index):
         d.index = di
     flags: List[str] = [] if why is None else ["id_" + why]
     sdigits, subject = [], ""
     if raw.FS is not None and len(raw.FS):
-        sdigits, subject, why = _read_digits(raw.FS, raw.SS, ical, raw.verified, raw.MS, trust)
+        sdigits, subject, why = _read_digits(raw.FS, raw.SS, ical, raw.verified, raw.MS, dtrust)
         if why is not None:
             flags.append("subject_" + why)
     calib = {"ink": cal.ink, "typ_fill": cal.typ, "t_lo": cal.t_lo, "t_hi": cal.t_hi,
@@ -1182,8 +1221,16 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
     ink = max(abs_ink, page_ink or 0.0)
     min_str = MIN_STRENGTH if page_ink is not None else STRENGTH_UNCALIBRATED
     res.quality.update({"ink_abs": abs_ink, "ink_marks_used": n_marks, "unreliable_bubbles": int(UA.sum() + UI.sum())})
-    FA, SA = _fill(DA, ink, UA)
-    FI, SI = _fill(DI, ink, UI)
+    # local ink levels: pencil ID block next to dark-pen answers, or a fresh pen half-way through, must each be judged by
+    # their own neighbourhood's marks, not by the page-wide level (the pen's) - omr.ink.local_levels
+    hot_ink = lambda D: np.where(D.mean(axis=1) > HOT_MEAN_DARKNESS, inkmod.bubble_ink(D), 0.0)
+    rm_a, rm_i = hot_ink(DA).reshape(len(qs), nc).max(1), hot_ink(DI).reshape(len(icols), 10).max(1)
+    lv = inkmod.local_levels(np.concatenate([rm_a, rm_i]), abs_ink, ink,
+                             [(range(len(qs)), True), (range(len(qs), len(qs) + len(icols)), False)])
+    inkA, inkI = np.repeat(lv[:len(qs)], nc), np.repeat(lv[len(qs):], 10)
+    res.quality["ink_local_span"] = float(lv.max() / max(lv.min(), 1e-6))
+    FA, SA = _fill(DA, inkA, UA)
+    FI, SI = _fill(DI, inkI, UI)
     MA, MI = _mean_dark(DA, UA).reshape(len(qs), nc), _mean_dark(DI, UI).reshape(len(icols), 10)
     FA, SA = FA.reshape(len(qs), nc), SA.reshape(len(qs), nc)
     FI, SI = FI.reshape(len(icols), 10), SI.reshape(len(icols), 10)

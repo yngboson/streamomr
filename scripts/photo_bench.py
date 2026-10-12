@@ -1,5 +1,5 @@
 """Real-photo bench: python scripts/photo_bench.py [--scale 1.0] [--rot 0]
-Checks every realasset/*.jpeg against realasset/truth.json: status, ID, subject, answers, review flags, time."""
+Checks every realasset/*.jpeg against realasset/truth.json, and realasset/mixed_ink_pencil_id.jpg against truth_mixed.json (pencil ID + pen answers): status, ID, subject, answers, review flags, time."""
 import argparse, glob, json, os, sys, time
 import cv2
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -9,7 +9,10 @@ ap = argparse.ArgumentParser(); ap.add_argument('--scale', type=float, default=1
 a = ap.parse_args()
 T = json.load(open('realasset/truth.json'))
 good = q_ok = q_all = 0; times = []
-for f in sorted(glob.glob('realasset/*.jpeg')):
+jobs = [(f, T) for f in sorted(glob.glob('realasset/*.jpeg'))]
+if os.path.exists('realasset/truth_mixed.json') and os.path.exists('realasset/mixed_ink_pencil_id.jpg'):
+    jobs.append(('realasset/mixed_ink_pencil_id.jpg', json.load(open('realasset/truth_mixed.json'))))
+for f, T in jobs:
     img = cv2.imread(f)
     if a.scale != 1.0: img = cv2.resize(img, None, fx=a.scale, fy=a.scale, interpolation=cv2.INTER_AREA)
     for _ in range(a.rot // 90): img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)

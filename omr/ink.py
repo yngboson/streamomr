@@ -149,3 +149,42 @@ def choose_floor(rows: Sequence[np.ndarray], black: float) -> AutoInk:
     if sep < MIN_SEPARATION:
         return AutoInk(DEFAULT_FRAC * black, "default", sep, True)
     return AutoInk(floor, "auto", sep, False)
+
+
+# ---------------------------------------------------------------------------------------------- local ink level
+LOCAL_RADII = (4, 8, 16)         # answer rows around a row whose marks set its ink level (grown until LOCAL_MIN_MARKS found)
+LOCAL_MIN_MARKS = 3
+LOCAL_DEADBAND = 0.15            # the level only goes DOWN, and only when it is this fraction under the page level (a region of lighter marks);
+                                 # a darker or similar region keeps the page level (single-instrument sheets stay exactly as they were)
+LOCAL_PCT = 75                   # windowed rows: this percentile of the neighbourhood's marks (the median is dragged down by a cluster of erasure ghosts)
+
+
+def local_levels(row_marks: Sequence[float], floor: float, fallback: float,
+                 sections: Sequence[Tuple[Sequence[int], bool]]) -> np.ndarray:
+    """Ink level per row from the marks of its own neighbourhood instead of the whole page.
+
+    One page can carry several instruments (pencil ID block, dark pen answers, a dying pen swapped for a fresh one half-way).
+    A single page-wide level makes the lighter instrument look "weak" (strength = darkness / ink level).  `row_marks`: per
+    row, the ink measure of its darkest bubble (0 when it has no hot bubble).  A row with a mark at or above `floor` (which
+    the sheet's own ghosts keep above erasure residue, see `choose_floor`) is judged by that mark's own darkness: a mark
+    lighter than its neighbours is a mark, not a "weak" one.  Other rows (blank, ghosts): median of the marks in their
+    neighbourhood, clipped below at `floor`; too few marks (fewer than `LOCAL_MIN_MARKS`) in reach: `fallback` (the page level).  `sections`: (row indices in reading order, windowed) -
+    windowed (answers): the neighbourhood is +-r rows, r from LOCAL_RADII, the first with enough marks; not windowed
+    (the ID + subject block): the whole section is one neighbourhood."""
+    rm = np.asarray(row_marks, np.float32)
+    out = np.full(len(rm), fallback, np.float32)
+    for idx, windowed in sections:
+        idx = np.asarray(idx, int)
+        if not len(idx):
+            continue
+        v = rm[idx]
+        ok = v >= floor
+        for j in range(len(idx)):
+            for r in (LOCAL_RADII if windowed else (len(idx),)):
+                lo, hi = max(0, j - r), min(len(idx), j + r + 1)
+                w = v[lo:hi][ok[lo:hi]]
+                if len(w) >= LOCAL_MIN_MARKS:
+                    lvl = max(floor, float(np.percentile(w, LOCAL_PCT if windowed else 50)))
+                    out[idx[j]] = lvl if lvl < (1.0 - LOCAL_DEADBAND) * fallback else fallback
+                    break
+    return out

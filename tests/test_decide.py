@@ -148,11 +148,12 @@ def test_relative_rule_is_off_unless_the_page_looks_like_faint_pencil_throughout
     MA[np.arange(n), np.arange(n) % nc] = 0.3                              # every question has one faint mark
     z = np.zeros((n, nc))
     mk = lambda MA_: R.PageRaw(list(range(1, n + 1)), [list("ABCDE")] * n, [0], z, z, np.zeros((1, 10)), np.zeros((1, 10)), 0.5, 0.6, MA=MA_)
-    assert R._rel_page_trust(mk(MA), CAL)
+    tr, page = R._rel_trust_answers(mk(MA), CAL)
+    assert page and tr.all()
     assert [a.marked for a in R.decide_page(mk(MA)).answers] == [[i % nc] for i in range(n)]
     few = np.full((n, nc), 0.04)
     few[:3, 0] = 0.3                                                       # a few ghost-like rows on an otherwise blank page
-    assert not R._rel_page_trust(mk(few), CAL) and all(a.state == "blank" for a in R.decide_page(mk(few)).answers)
+    assert not R._rel_trust_answers(mk(few), CAL)[0][:3].any() and all(a.state == "blank" for a in R.decide_page(mk(few)).answers)
     # a confident dark mark with a ghost beside it is erasure evidence: the page is not trusted
     F = z.copy()
     F[:, 0] = 0.95
@@ -162,7 +163,7 @@ def test_relative_rule_is_off_unless_the_page_looks_like_faint_pencil_throughout
     ghosty[:, 0] = 0.8
     ghosty[:, 1] = 0.3
     raw = R.PageRaw(list(range(1, n + 1)), [list("ABCDE")] * n, [0], F, S, np.zeros((1, 10)), np.zeros((1, 10)), 0.5, 0.6, MA=ghosty)
-    assert not R._rel_page_trust(raw, CAL)
+    assert not R._rel_trust_answers(raw, CAL)[0].any()
 
 
 def test_on_a_faint_pencil_page_a_part_dark_bubble_read_by_the_absolute_rules_is_flagged():
@@ -172,3 +173,64 @@ def test_on_a_faint_pencil_page_a_part_dark_bubble_read_by_the_absolute_rules_is
     assert R._decide(f, st, CAL, md=md, trust_rel=True)[3]
     md[2] = 0.3                                                            # an evenly dark mark: untouched
     assert not R._decide(f, st, CAL, md=md, trust_rel=True)[3]
+
+
+def _page(n, MA, F=None, S=None, FI=None, SI=None, MI=None):
+    z = np.zeros((n, 5))
+    return R.PageRaw(list(range(1, n + 1)), [list("ABCDE")] * n, list(range(0 if FI is None else len(FI))),
+                     z if F is None else F, z if S is None else S,
+                     np.zeros((0, 10)) if FI is None else FI, np.zeros((0, 10)) if SI is None else SI, 0.5, 0.6, MA=MA,
+                     MI=MI)
+
+
+def test_relative_trust_is_local_to_the_region_not_the_page():
+    """A faint-ink part (the last questions) and an ordinary part on one page: the rule is on where the faint marks are (and the dark half has no ghosts)."""
+    n = 40
+    MA = np.full((n, 5), 0.04)
+    MA[np.arange(n), np.arange(n) % 5] = 0.4                      # every question has a strong pencil mark the strict rules cannot take ...
+    F = np.zeros((n, 5)); S = np.zeros((n, 5))
+    F[:28, 0] = 0.95; S[:28, 0] = 1.0                            # ... but the first half is dark and confident
+    MA[:28] = 0.04; MA[:28, 0] = 0.8
+    MA[28:] = 0.04; MA[28 + np.arange(12), np.arange(12) % 5] = 0.4   # (second half: faint ink only)
+    t, page = R._rel_trust_answers(_page(n, MA, F, S), CAL)
+    assert not page
+    assert t[35:].all() and not t[:18].any()
+
+
+def test_relative_trust_digits_block_has_its_own_evidence():
+    FI = np.zeros((6, 10)); SI = np.zeros((6, 10)); MI = np.full((6, 10), 0.03)
+    MI[np.arange(6), np.arange(6)] = 0.45                         # pencil ID: uniform, no fill read by the strict absolute rules
+    assert R._rel_trust_digits(FI, SI, MI, CAL)
+    MI2 = np.full((6, 10), 0.03); MI2[0, 1] = 0.45               # one lone faint mark: erasure-like
+    assert not R._rel_trust_digits(FI, SI, MI2, CAL)
+
+
+def test_pencil_id_next_to_pen_answers_is_read():
+    """Pen answers set the page ink level high; the pencil digits are judged against their own block (omr.ink.local_levels)."""
+    from omr import ink as inkmod
+    row_marks = np.concatenate([np.full(20, 0.77), np.full(7, 0.46)])
+    lv = inkmod.local_levels(row_marks, 0.4, 0.77, [(range(20), True), (range(20, 27), False)])
+    assert np.allclose(lv[:20], 0.77) and np.allclose(lv[20:], 0.46)
+    D = np.full((10, 40), 0.03, np.float32); D[4] = 0.46          # a pencil digit
+    f_page, s_page = R._fill(D, 0.77)
+    f_loc, s_loc = R._fill(D, np.full(10, 0.46, np.float32))
+    assert s_page[4] < R.MIN_STRENGTH <= s_loc[4] and f_loc[4] > f_page[4]
+    cal = R._Calib(ink=0.46, typ=1.0, t_hi=0.65, t_lo=0.13)
+    assert R._decide(f_loc, s_loc, cal, strict=True)[:2] == ("single", [4])
+    assert R._decide(f_page, s_page, cal, strict=True)[3]         # page-wide level: the same mark is flagged (the old failure)
+
+
+def test_local_ink_never_turns_a_half_filled_digit_into_a_read():
+    D = np.full((10, 60), 0.03, np.float32); D[4, :27] = 0.46    # a pencil half-filled bubble (45 % of the disc)
+    f, s = R._fill(D, np.full(10, 0.46, np.float32))
+    cal = R._Calib(ink=0.46, typ=1.0, t_hi=0.65, t_lo=0.13)
+    assert R._decide(f, s, cal, strict=True)[3] or R._decide(f, s, cal, strict=True)[0] != "single"
+
+
+def test_local_levels_only_go_down_in_a_lighter_region_and_ignore_ghosts():
+    from omr import ink as inkmod
+    rm = np.array([0.8, 0.8, 0.8, 0.8, 0.5, 0.5, 0.5, 0.0, 0.3, 0.5, 0.5, 0.5])   # dark pen, then a lighter pen; a blank row and a ghost (0.3 < floor)
+    lv = inkmod.local_levels(rm, 0.4, 0.7, [(range(12), True)])
+    assert np.allclose(lv[:2], 0.7)                                     # dark / similar to the page: the page level, unchanged
+    assert np.allclose(lv[7:], 0.5)   # lighter region: its own level; blank / ghost rows follow their neighbours
+    assert np.allclose(inkmod.local_levels(np.array([0.0, 0.0]), 0.4, 0.7, [(range(2), True)]), 0.7)   # no marks in reach: page level
