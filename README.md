@@ -22,5 +22,5 @@ iOS Safari 카메라는 **https에서만** 동작 (`file://` 불가).
 - iPhone Safari에서 Worker 안 Pyodide 메모리 한계로 탭이 죽을 가능성 있음 — 실기기 검증 전.
 
 ### 로그
-- 2026-10-12: standalone "최근 스캔" 항목을 탭하면 상세 모달(`#detail`)이 열림. `standalone/glue.py::detail()`이 커밋 시 보정된 시트(JPEG base64)와 문항/학번/과목별 버블 좌표·점수·판정을 내려주고, `standalone/app.js`의 `showDetail/renderDetail/drawSheet`가 시트 전체를 한 캔버스에 그리고(크롭 없음) 모든 버블에 색 링 + 문제 행에 박스, 아래에 문제 항목 목록(초록=인식됨, 빨강=복수마킹, 주황=애매/공란)과 선지별 농도(%)를 표시. 기본은 문제 있는 문항만 표시(체크박스로 전체). **브라우저 실기기 렌더링은 미검증**(파이썬 쪽 detail()과 JS 문법만 확인). 서버판 `app/static/scan.js`에는 아직 없음.
+- 2026-10-12: standalone "최근 스캔" 항목을 탭하면 상세 모달(`#detail`)이 열림. `standalone/glue.py::detail()`이 커밋 시 보정된 시트(JPEG base64)와 문항/학번/과목별 버블 좌표·점수·판정을 내려주고, `standalone/app.js`의 `showDetail/renderDetail/drawSheet`가 시트 전체를 한 캔버스에 그리고(크롭 없음) 모든 버블에 색 링 + 문제 행에 박스, 아래에 문제 항목 목록(초록=인식됨, 빨강=복수마킹, 주황=애매/공란)과 선지별 농도(%)를 표시. **브라우저 실기기 렌더링은 미검증**(파이썬 쪽 detail()과 JS 문법만 확인). 서버판 `app/static/scan.js`에는 아직 없음.
 - 2026-10-12: GitHub Pages 배포 경로 정리(루트 `index.html` 리다이렉트 추가), 이 핸드오프 섹션 작성. 아이폰 실기기 테스트는 아직 안 함.
