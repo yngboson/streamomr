@@ -11,7 +11,7 @@ ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
 .modal h2 { margin:0 0 6px; font-size:17px; }
 .qrow { border:1px solid #2a313b; border-radius:8px; padding:8px; margin:8px 0; }
 .qrow.bad { border-color:var(--bad); } .qrow.doubt { border-color:var(--warn); }
-.qrow canvas { width:100%; max-width:560px; display:block; border-radius:4px; background:#fff; }
+.sheet { width:100%; display:block; border-radius:4px; background:#fff; margin:6px 0; }
 .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
 .chip { padding:2px 8px; border-radius:6px; background:#2a313b; font-size:13px; }
 .chip.on { background:var(--ok); color:#000; } .chip.bad { background:var(--bad); color:#000; font-weight:700; } .chip.doubt { background:var(--warn); color:#000; font-weight:700; }
@@ -42,7 +42,6 @@ ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
 </div>
 <div id="detail" class="modal" hidden><div class="box">
   <div class="row" style="justify-content:space-between"><h2 id="dtitle"></h2><button id="dclose" class="secondary">닫기</button></div>
-  <label class="small"><input type="checkbox" id="donly" checked style="width:auto"> 문제 있는 문항만 보기</label>
   <div id="dbody"></div>
 </div></div>
 <div id="loading" class="loading"><div><b id="loadtitle">StreamOMR 불러오는 중</b><div id="loadmsg" class="mut"></div><div class="mut small">처음 한 번 약 30MB를 내려받습니다 (이후엔 캐시).</div></div></div>

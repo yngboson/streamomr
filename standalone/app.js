@@ -72,19 +72,6 @@ function rowStatus(r) {
   if (r.doubt) return ['doubt', '애매'];
   return ['', '정상'];
 }
-function cropRow(img, d, centers, vs, rMM, extraLeft) {
-  const ppm = d.ppm, xs = centers.map(c => c[0]), ys = centers.map(c => c[1]);
-  const x0 = Math.min(...xs) - rMM - extraLeft, x1 = Math.max(...xs) + rMM + 2, y0 = Math.min(...ys) - rMM - 1.2, y1 = Math.max(...ys) + rMM + 1.2;
-  const sw = (x1 - x0) * ppm, sh = (y1 - y0) * ppm, scale = Math.min(2.2, 540 / sw);
-  const cv = document.createElement('canvas'); cv.width = Math.round(sw * scale); cv.height = Math.round(sh * scale);
-  const c = cv.getContext('2d'); c.drawImage(img, x0 * ppm, y0 * ppm, sw, sh, 0, 0, cv.width, cv.height);
-  centers.forEach(([x, y], i) => {
-    const px = (x - x0) * ppm * scale, py = (y - y0) * ppm * scale;
-    c.lineWidth = vs[i] === 'off' ? 1.5 : 3.5; c.strokeStyle = D_COL[vs[i]];
-    c.beginPath(); c.arc(px, py, rMM * ppm * scale * 1.25, 0, 6.2832); c.stroke();
-  });
-  return cv;
-}
 function chipsFor(r, vs, kind) {
   return '<div class="chips">' + r.scores.map((v, i) => `<span class="chip ${vs[i] === 'off' ? '' : vs[i]}">${kind === 'q' ? esc(r.labels[i] ?? cl(i)) : i} &middot; ${Math.round(v * 100)}%</span>`).join('') + '</div>';
 }
@@ -93,38 +80,48 @@ function showDetail(s, d) {
   img.onload = () => renderDetail(s, d, img);
   img.src = 'data:image/jpeg;base64,' + d.img;
 }
+// whole rectified sheet in one canvas: a ring on every bubble, a box + number around each doubtful row
+function drawSheet(img, d, groups) {
+  const cv = document.createElement('canvas'); cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+  const c = cv.getContext('2d'), ppm = d.ppm; c.drawImage(img, 0, 0);
+  groups.forEach(({ rows, kind, lo, hi }) => rows.forEach(r => {
+    if (!r.centers.length) return;
+    const [cls] = rowStatus(r), vs = verdicts(r, lo, hi, kind), rMM = bubbleR(r);
+    r.centers.forEach(([x, y], i) => {
+      c.lineWidth = (vs[i] === 'off' ? 3 : 10) * ppm / 6; c.strokeStyle = D_COL[vs[i]];
+      c.beginPath(); c.arc(x * ppm, y * ppm, rMM * ppm * 1.25, 0, 6.2832); c.stroke();
+    });
+    if (!cls) return;
+    const xs = r.centers.map(p => p[0]), ys = r.centers.map(p => p[1]);
+    const x0 = (Math.min(...xs) - rMM - (kind === 'q' ? 6 : 1.5)) * ppm, y0 = (Math.min(...ys) - rMM - 1) * ppm;
+    c.lineWidth = 8 * ppm / 6; c.strokeStyle = D_COL[cls]; c.strokeRect(x0, y0, (Math.max(...xs) + rMM + 2) * ppm - x0, (Math.max(...ys) + rMM + 1) * ppm - y0);
+  }));
+  return cv;
+}
+function bubbleR(r) {
+  return Math.min(...r.centers.slice(1).map((c, i) => Math.hypot(c[0] - r.centers[i][0], c[1] - r.centers[i][1])), 8) * 0.38;
+}
 function renderDetail(s, d, img) {
   $('dtitle').textContent = `${subjLabel(s.subject)} ${s.student_id ?? '(번호 없음)'} · ${s.page + 1}페이지`;
   const body = $('dbody'); body.innerHTML = '';
-  const only = $('donly').checked;
-  const build = () => {
-    body.innerHTML = '';
-    const sect = (title, rows, kind, lo, hi) => {
-      let shown = 0;
-      const wrap = document.createElement('div'); wrap.innerHTML = `<b>${title}</b>`;
-      rows.forEach((r, idx) => {
-        if (!r.centers.length) return;
-        const [cls, txt] = rowStatus(r);
-        if ($('donly').checked && !cls) return;
-        shown++;
-        const vs = verdicts(r, lo, hi, kind);
-        const rMM = Math.min(...r.centers.slice(1).map((c, i) => Math.hypot(c[0] - r.centers[i][0], c[1] - r.centers[i][1])), 8) * 0.38;
-        const box = document.createElement('div'); box.className = 'qrow ' + cls;
-        const name = kind === 'q' ? `${r.q}번` : `${kind === 'id' ? '학번' : '과목'} ${idx + 1}번째 자리`;
-        box.innerHTML = `<b>${name}</b> <span class="${cls === 'bad' ? 'err' : 'mut'}">${txt}</span>`;
-        box.appendChild(cropRow(img, d, r.centers, vs, rMM, kind === 'q' ? 6 : 1));
-        box.insertAdjacentHTML('beforeend', chipsFor(r, vs, kind));
-        wrap.appendChild(box);
-      });
-      if (!shown) wrap.insertAdjacentHTML('beforeend', `<div class="mut small">${$('donly').checked ? '문제 없음' : '데이터 없음'}</div>`);
-      body.appendChild(wrap);
-    };
-    sect('문항', d.answers, 'q', d.t_lo ?? 0.2, d.t_hi ?? 0.5);
-    if (d.id.length) sect('학번', d.id, 'id', d.id_t_lo ?? d.t_lo ?? 0.2, d.id_t_hi ?? d.t_hi ?? 0.5);
-    if (d.subject.length) sect('과목 코드', d.subject, 'subject', d.id_t_lo ?? d.t_lo ?? 0.2, d.id_t_hi ?? d.t_hi ?? 0.5);
-    if (s.flags.length) body.insertAdjacentHTML('afterbegin', `<div class="small" style="margin:6px 0">플래그: <span class="tag warn">${esc(s.flags.join(', '))}</span></div>`);
-  };
-  $('donly').onchange = build; build();
+  const q = { rows: d.answers, kind: 'q', lo: d.t_lo ?? 0.2, hi: d.t_hi ?? 0.5, name: r => `${r.q}번` };
+  const idLo = d.id_t_lo ?? d.t_lo ?? 0.2, idHi = d.id_t_hi ?? d.t_hi ?? 0.5;
+  const groups = [q, { rows: d.id, kind: 'id', lo: idLo, hi: idHi, name: (r, i) => `학번 ${i + 1}번째 자리` },
+                  { rows: d.subject, kind: 'subject', lo: idLo, hi: idHi, name: (r, i) => `과목 코드 ${i + 1}번째 자리` }];
+  if (s.flags.length) body.insertAdjacentHTML('beforeend', `<div class="small" style="margin:6px 0">플래그: <span class="tag warn">${esc(s.flags.join(', '))}</span></div>`);
+  const cv = drawSheet(img, d, groups); cv.className = 'sheet'; body.appendChild(cv);
+  body.insertAdjacentHTML('beforeend', '<div class="mut small">초록=인식됨 · 빨강=복수 마킹 · 주황=애매/공란 · 회색=빈 칸. 확대해서 보세요.</div>');
+  const list = document.createElement('div'); let n = 0;
+  groups.forEach(g => g.rows.forEach((r, i) => {
+    const [cls, txt] = rowStatus(r);
+    if (!cls || !r.centers.length) return;
+    n++;
+    const box = document.createElement('div'); box.className = 'qrow ' + cls;
+    box.innerHTML = `<b>${g.name(r, i)}</b> <span class="${cls === 'bad' ? 'err' : 'mut'}">${txt}</span>` + chipsFor(r, verdicts(r, g.lo, g.hi, g.kind), g.kind);
+    list.appendChild(box);
+  }));
+  list.insertAdjacentHTML('afterbegin', `<b>${n ? '확인할 항목 ' + n + '개' : '문제 있는 항목 없음'}</b>`);
+  body.appendChild(list);
   $('detail').hidden = false;
 }
 $('dclose').onclick = () => { $('detail').hidden = true; };
