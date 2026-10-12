@@ -51,6 +51,8 @@ SAME_PLACE = 0.35                        # same id counts as the same detection 
 
 COMPLETE_ROI = 1.3                       # missing-corner search window half-size / predicted marker side
 COMPLETE_MAX_OFF = 0.9                   # a found marker must lie within this * side of where the other three predict it
+COMPLETE_WIDE = (2.6, 2.2)               # second, wider (window, max offset) when the first finds nothing: on a curled sheet the
+                                         # three markers' homography predicts the fourth up to ~1.6 sides off (measured, synth curl)
 COMPLETE_KERNELS = (0.85, 0.55, 0.35)    # opening kernels (of a module) tried there: a marker turned ~45 deg has only ~0.7 module of straight white
 COMPLETE_SIDE = (0.6, 1.6)               # blob quad side / predicted side
 
@@ -217,7 +219,7 @@ def flatten_lighting(gray: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(flat, (0, 0), FLAT_DENOISE_SIGMA).astype(np.uint8)
 
 
-def _blob_quads(img: np.ndarray, pred_side: float, pred_c: np.ndarray):
+def _blob_quads(img: np.ndarray, pred_side: float, pred_c: np.ndarray, max_off: float = COMPLETE_MAX_OFF):
     """Dark blobs of a local window that are convex quadrilaterals of about the predicted size and place.
 
     ArUco's candidate search needs a clean closed contour; a blurred, streaked marker may not give one although a plain Otsu
@@ -231,38 +233,67 @@ def _blob_quads(img: np.ndarray, pred_side: float, pred_c: np.ndarray):
         if len(ap) != 4 or not cv2.isContourConvex(ap.reshape(-1, 1, 2)):
             continue
         q = ap.astype(np.float64)
-        if COMPLETE_SIDE[0] * pred_side <= _side(q) <= COMPLETE_SIDE[1] * pred_side and np.linalg.norm(q.mean(0) - pred_c) < COMPLETE_MAX_OFF * pred_side:
+        if COMPLETE_SIDE[0] * pred_side <= _side(q) <= COMPLETE_SIDE[1] * pred_side and np.linalg.norm(q.mean(0) - pred_c) < max_off * pred_side:
             yield q
 
 
 def _complete(m: "_Merge", gray: np.ndarray) -> int:
-    """A page with exactly three markers found: look for the fourth where the three predict it (their layout is known).
+    """A page with three (or two) markers found: look for the missing ones where the found ones predict them (their layout
+    is known; two markers predict through an affine map and are only searched in the wide window).
 
     The early stop at three markers (plain/opened passes over the whole frame) leaves a visible fourth marker undetected when
     its own contour was broken (streaks, blur, rotation) -> `corner_hidden`.  The search is a small window, so it is cheap
     and uses passes the whole-frame search cannot afford (several kernels, blob quads).  Returns detector runs used."""
-    groups: Dict[int, List[int]] = {}
-    for i in m.found:
-        groups.setdefault(i // 4, []).append(i)
-    page = next((g for g, v in groups.items() if len(v) == 3), None)
-    if page is None:
-        return 0
-    miss = next(i for i in range(4 * page, 4 * page + 4) if i not in m.found)
-    mm = {mk.marker_id(page, c): np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], np.float64)
-          for c, (x, y, w, h) in lay.marker_rects(page).items()}
-    ids = sorted(groups[page])
-    H, _ = cv2.findHomography(np.concatenate([mm[i] for i in ids]), np.concatenate([m.found[i] for i in ids]), 0)
-    if H is None or not np.isfinite(H).all():
-        return 0
-    pq = cv2.perspectiveTransform(mm[miss].reshape(-1, 1, 2), H).reshape(4, 2)
-    side, ctr = _side(pq), pq.mean(0)
-    if not (np.isfinite(pq).all() and side > 0):
-        return 0
+    runs = 0
+    for _ in range(2):                                 # 2 markers -> 3 -> 4
+        groups: Dict[int, List[int]] = {}
+        for i in m.found:
+            groups.setdefault(i // 4, []).append(i)
+        if any(len(v) >= 4 for v in groups.values()):
+            break
+        cand = [g for g, v in groups.items() if len(v) == 3] or [g for g, v in groups.items() if len(v) == 2]
+        if not cand or (len(cand) > 1 and len(groups[cand[0]]) == 2):
+            break                                      # two pages with two markers each: nothing to go by
+        page = cand[0]
+        ids = sorted(groups[page])
+        mm = {mk.marker_id(page, c): np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], np.float64)
+              for c, (x, y, w, h) in lay.marker_rects(page).items()}
+        src, dst = np.concatenate([mm[i] for i in ids]), np.concatenate([m.found[i] for i in ids])
+        if len(ids) == 3:
+            H, _ = cv2.findHomography(src, dst, 0)
+        else:                                          # two squares cannot pin a perspective: an affine map (well posed)
+            A = np.linalg.lstsq(np.c_[src, np.ones(len(src))], dst, rcond=None)[0].T
+            H = np.vstack([A, [0, 0, 1]])
+        if H is None or not np.isfinite(H).all():
+            break
+        got = False
+        for miss in (i for i in range(4 * page, 4 * page + 4) if i not in m.found):
+            pq = cv2.perspectiveTransform(mm[miss].reshape(-1, 1, 2), H).reshape(4, 2)
+            side, ctr = _side(pq), pq.mean(0)
+            if not (np.isfinite(pq).all() and side > 0):
+                continue
+            stages = ((COMPLETE_ROI, COMPLETE_MAX_OFF), COMPLETE_WIDE) if len(ids) == 3 else (COMPLETE_WIDE,)
+            for roi_f, max_off in stages:
+                q, r = _search_window(gray, miss, side, ctr, roi_f, max_off)
+                runs += r
+                if q is not None:
+                    m.add([q.reshape(1, 4, 2)], np.array([[miss]]))
+                    got = True
+                    break
+            if got:
+                break                                  # re-predict the rest from one more marker
+        if not got:
+            break
+    return runs
+
+
+def _search_window(gray, miss, side, ctr, roi_f, max_off):
+    """Look for marker ``miss`` in a window of half-size roi_f * side around ctr -> (corners or None, detector runs)."""
     h, w = gray.shape[:2]
-    x0, y0 = np.maximum((ctr - COMPLETE_ROI * side).astype(int), 0)
-    x1, y1 = np.minimum((ctr + COMPLETE_ROI * side).astype(int), [w, h])
+    x0, y0 = np.maximum((ctr - roi_f * side).astype(int), 0)
+    x1, y1 = np.minimum((ctr + roi_f * side).astype(int), [w, h])
     if x1 - x0 < side * 0.5 or y1 - y0 < side * 0.5:
-        return 0                                       # the predicted marker lies outside the frame
+        return None, 0                                 # the predicted marker lies outside the frame
     roi, off = gray[y0:y1, x0:x1], np.array([x0, y0], np.float64)
     local = _Merge()
     det, runs = _detector(), 0
@@ -274,18 +305,17 @@ def _complete(m: "_Merge", gray: np.ndarray) -> int:
         if miss not in local.found:
             _redecode(local, roi, (roi, img), rej, side * COMPLETE_SIDE[0])
         if miss not in local.found:
-            for q in _blob_quads(img, side, ctr - off):
+            for q in _blob_quads(img, side, ctr - off, max_off):
                 out = model_decode(img, q)
                 if out is not None and out[0] == miss:
                     local.add([out[1].reshape(1, 4, 2)], np.array([[miss]]))
                     break
         if miss in local.found:
             q = local.found[miss] + off
-            if np.linalg.norm(q.mean(0) - ctr) < COMPLETE_MAX_OFF * side:
-                m.add([q.reshape(1, 4, 2)], np.array([[miss]]))
-                break
+            if np.linalg.norm(q.mean(0) - ctr) < max_off * side:
+                return q, runs
             local.found.pop(miss)
-    return runs
+    return None, runs
 
 
 def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:

@@ -70,7 +70,7 @@ DIGIT_MARGIN_FROM, DIGIT_MARGIN_FULL = 0.7, 1.0   # ... scaled in by strength be
                                                   # never reached t_hi, 0.8-1.0 reached t_hi + 0.02, above 1.0 t_hi + 0.07)
 
 
-SOFT_FLAGS = ("serial_unreadable", "corner_hidden", "guessed_answers")   # informational: never a reason for human review
+SOFT_FLAGS = ("serial_unreadable", "corner_hidden", "guessed_answers", "marker_dropped")   # informational: never a reason for human review
 SERIAL_ABSENT_RATIO = 0.65            # darkest/brightest serial cell above this = nothing printed
 
 
@@ -1045,9 +1045,52 @@ def decide_page(raw: PageRaw) -> PageDecision:
 
 
 # =============================================================================== main
+DROP_RETRY_STATUSES = (BAD_GEOMETRY, BAD_META)
+DROP_RETRY_SKIP_FLAGS = ("page_mismatch", "layout_mismatch")
+
+
 def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Optional[lay.Layout]]] = None,
               px_per_mm: float = DEFAULT_PX_PER_MM, keep_images: bool = True) -> RecognitionResult:
+    """Read one frame.  A curled corner can carry a marker that is found but does not lie on the sheet's plane: the
+    four-marker homography then fails (marker reprojection error, header off its cells) where the other three alone,
+    with the ring alignment / tracks bending the rest, read fine.  So a frame that fails geometry or header with all four
+    markers is retried once without the marker that fits the others worst (as if it were hidden)."""
     t_start = time.perf_counter()
+    gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    t0 = time.perf_counter()
+    det = find_markers_scaled(gray)
+    t_det = (time.perf_counter() - t0) * 1000.0
+    res = _recognize(gray, det, resolve_layout, px_per_mm, keep_images, t_start, t_det)
+    if res.status in DROP_RETRY_STATUSES and not any(f in res.flags for f in DROP_RETRY_SKIP_FLAGS):
+        found, dup, dinfo = det
+        page = res.page
+        ids = [i for i in found if page is not None and i // 4 == page]
+        if len(ids) == 4:
+            worst = _worst_marker(found, ids, page)
+            red = {i: c for i, c in found.items() if i != worst}
+            res2 = _recognize(gray, (red, dup, {**dinfo, "dropped_marker": float(worst)}), resolve_layout, px_per_mm, keep_images,
+                              t_start, t_det)
+            if res2.status == OK:
+                res2.flags.append("marker_dropped")
+                return res2
+            res.timing_ms["total"] = (time.perf_counter() - t_start) * 1000.0
+    return res
+
+
+def _worst_marker(found, ids, page) -> int:
+    """The marker whose corners the homography of all of them reprojects worst (mean corner error)."""
+    mm = _marker_corners_mm(page)
+    src = np.concatenate([found[i] for i in ids])
+    dst = np.concatenate([mm[i] for i in ids])
+    H, _ = cv2.findHomography(src, dst, 0)
+    if H is None:
+        return ids[0]
+    err = np.linalg.norm(cv2.perspectiveTransform(src.reshape(-1, 1, 2), H).reshape(-1, 2) - dst, axis=1).reshape(len(ids), 4).mean(1)
+    return ids[int(np.argmax(err))]
+
+
+def _recognize(gray: np.ndarray, det, resolve_layout, px_per_mm: float, keep_images: bool, t_start: float,
+               t_det: float) -> RecognitionResult:
     tm: Dict[str, float] = {}
 
     def lap(name, t0):
@@ -1058,14 +1101,10 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
         res.timing_ms = tm
         return res
 
-    t0 = time.perf_counter()
-    gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    lap("gray", t0)
-
-    # ---- 1. markers
-    t0 = time.perf_counter()
-    found, dup, dinfo = find_markers_scaled(gray)
-    lap("detect", t0)
+    # ---- 1. markers (found by the caller)
+    found, dup, dinfo = det
+    found = dict(found)
+    tm["detect"] = t_det
     res = RecognitionResult(status=NO_SHEET, px_per_mm=px_per_mm)
     if not found:
         return done(res)

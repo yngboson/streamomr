@@ -308,8 +308,9 @@ def test_two_hidden_markers_is_partial_not_a_result(assets, pair):
 
 
 def test_three_markers_geometry_is_checked(assets):
-    """A third marker that does not fit the sheet geometry (wrong place) must not give a result."""
-    frame, _, L = marked_frame(assets, "q45")
+    """A marker that does not fit the sheet geometry (wrong place) must not give a result from it: either the frame is
+    rejected, or it is read from the other three alone (as if the misplaced one were hidden), flagged, and right."""
+    frame, truth, L = marked_frame(assets, "q45")
     _cover(frame, L, 2)
     h, w = frame.shape[:2]
     q = L.pages[0].markers[2].rect
@@ -317,7 +318,12 @@ def test_three_markers_geometry_is_checked(assets):
     # a genuine-looking BR marker pasted far from where the sheet geometry puts it
     _paste_marker(frame, mk.marker_id(0, "BR"), int((q[0] + 12 - 30) * s), int((q[1] + 12 - 44) * s), px=int(16 * s))
     r = recognize(frame)
-    assert r.status != "ok" and r.answers == []
+    if r.status == "ok":
+        assert "marker_dropped" in r.flags and mk.marker_id(0, "BR") not in r.marker_ids
+        ev = synth.evaluate(r, truth)
+        assert ev["q_silent"] == 0 and ev["id_wrong"] == 0
+    else:
+        assert r.answers == []
 
 
 @pytest.mark.parametrize("ppm", [2.4, 3.2, 4.5, 6.5])
