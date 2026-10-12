@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamOMR - 대시보드</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><header class="nav"></header>
+<main class="wide">
+<h1 id="title">대시보드</h1>
+<div class="stats-row" id="stats"></div>
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <h2 style="margin:0">학생</h2>
+    <span class="row"><span class="mut small" id="upd"></span><a id="csv" href="#"><button type="button" class="secondary">CSV 다운로드</button></a></span>
+  </div>
+  <div class="tablewrap"><table class="t" id="tbl"><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+  <p class="mut" id="empty" hidden>아직 스캔된 학생이 없습니다. <a id="scanlink" href="#">스캔 화면</a>에서 시작하세요.</p>
+</div>
+<div class="card" id="serialcard" hidden>
+  <h2>일련번호 (인쇄본 확인)</h2>
+  <div id="serialbody" class="small"></div>
+</div>
+<div class="card">
+  <h2>이미지 업로드</h2>
+  <div class="drop" id="drop">사진 파일을 여기에 끌어다 놓거나 <label style="display:inline"><u>파일 선택</u><input type="file" id="up" accept="image/*" multiple hidden></label></div>
+  <ul id="upout" class="scans" style="list-style:none;padding:0"></ul>
+</div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+if (needExam()) {
+const COLS = [
+  ['student_id', '수험번호', s => esc(s.student_id)],
+  ['status', '상태', s => statusBadge(s.status)],
+  ['score', '점수', s => s.score === null ? '<span class="mut">-</span>' : `${num(s.score)} / ${num(s.max_score)}`],
+  ['provisional', '잠정', s => s.provisional ? badge('needs_review', '잠정') : ''],
+  ['pages', '페이지', s => s.pages_present.join(',') + (s.pages_missing.length ? ` <span class="err">(없음: ${s.pages_missing.join(',')})</span>` : '')],
+  ['n_doubtful', '의심 문항', s => s.n_doubtful || ''],
+];
+let sortKey = 'student_id', sortDir = 1, data = null;
+const sortVal = (s, k) => k === 'pages' ? s.pages_missing.length : k === 'provisional' ? (s.provisional ? 1 : 0) : (s[k] ?? -1);
+function render() {
+  if (!data) return;
+  const ex = data.exam;
+  $('title').textContent = ex.title + (ex.subject_label ? ` (${ex.subject_label})` : '');
+  const e = `exam_id=${ex.id}`;
+  $('stats').innerHTML =
+    `<div class="stat"><b>${ex.n_students}</b><span>학생</span></div>` +
+    `<div class="stat"><b>${ex.n_scans}</b><span>스캔</span></div>` +
+    `<a class="stat ${ex.n_conflicts ? 'alert' : ''}" href="/static/conflicts.html?${e}"><b>${ex.n_conflicts}</b><span>충돌</span></a>` +
+    `<a class="stat ${ex.n_unassigned ? 'warnc' : ''}" href="/static/unassigned.html?${e}"><b>${ex.n_unassigned}</b><span>미할당</span></a>` +
+    `<a class="stat" href="/static/key.html?${e}"><b>${ex.has_key ? ex.n_keyed + '/' + ex.n_questions : '없음'}</b><span>정답키${ex.has_key ? '' : ' (설정하기)'}</span></a>` +
+    `<a class="stat" href="${ex.pdf_url}"><b>PDF</b><span>${ex.n_questions}문항 / ${ex.total_pages}p</span></a>`;
+  renderSerials(data.serials);
+  $('csv').href = `/api/exams/${ex.id}/export.csv`;
+  $('scanlink').href = `/static/scan.html?${e}`;
+  const rows = data.students.slice().sort((a, b) => {
+    const x = sortVal(a, sortKey), y = sortVal(b, sortKey);
+    return (x < y ? -1 : x > y ? 1 : 0) * sortDir || (a.student_id < b.student_id ? -1 : 1);
+  });
+  $('thead').innerHTML = '<tr>' + COLS.map(c => `<th data-k="${c[0]}">${c[1]}${sortKey === c[0] ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
+  $('tbody').innerHTML = rows.map(s =>
+    `<tr class="click" data-s="${esc(s.student_id)}">` + COLS.map(c => `<td>${c[2](s)}</td>`).join('') + '</tr>').join('');
+  $('empty').hidden = rows.length > 0;
+  renderNav('exam', ex);
+}
+function renderSerials(s) {
+  const card = $('serialcard');
+  if (!s || !s.n_issued) { card.hidden = true; return; }
+  const rng = a => a.map(([x, y]) => x === y ? `${x}` : `${x}~${y}`).join(', ');
+  let h = `<p>발행 ${s.n_issued}부 &middot; 스캔된 번호 ${s.n_scanned}부 &middot; 인쇄했지만 스캔 안 된 번호 ${s.n_unscanned}부 ` +
+    `<span class="mut">(안 쓴 빈 시트는 정상입니다. 참고용 정보입니다.)</span></p>`;
+  if (s.n_unscanned) h += `<p>스캔 안 된 일련번호: ${esc(rng(s.unscanned))}</p>`;
+  if (s.partial.length) h += `<p>일부 페이지만 스캔된 번호: ` + s.partial.map(p =>
+    `No. ${String(p.serial).padStart(4, '0')} (없는 페이지 ${p.pages_missing.join(',')}${p.students.length ? ' / 수험번호 ' + esc(p.students.join(',')) : ''})`).join('; ') + '</p>';
+  if (s.unissued.length) h += `<p class="mut">이 시스템에서 발행하지 않은 번호가 스캔됨: ${esc(s.unissued.join(', '))}</p>`;
+  $('serialbody').innerHTML = h;
+  card.hidden = false;
+}
+$('thead').onclick = ev => {
+  const k = ev.target.closest('th') && ev.target.closest('th').dataset.k; if (!k) return;
+  if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
+  render();
+};
+$('tbody').onclick = ev => {
+  const tr = ev.target.closest('tr'); if (!tr) return;
+  location.href = `/static/student.html?exam_id=${EXAM_ID}&student_id=${encodeURIComponent(tr.dataset.s)}`;
+};
+async function load() {
+  try {
+    data = await api(`/api/exams/${EXAM_ID}/dashboard`);
+    render();
+    $('upd').textContent = '갱신: ' + new Date().toLocaleTimeString('ko-KR');
+  } catch (e) { $('upd').textContent = e.message; }
+}
+load();
+setInterval(() => { if (!document.hidden) load(); }, 4000);
+
+// ---- upload
+async function upload(files) {
+  files = Array.from(files).filter(f => f.size > 0);
+  if (!files.length) return;
+  const out = $('upout');
+  out.insertAdjacentHTML('afterbegin', `<li class="mut" id="busy">${files.length}개 파일 처리 중...</li>`);
+  // a few files per request so progress shows up and requests stay small
+  for (let i = 0; i < files.length; i += 4) {
+    const fd = new FormData();
+    files.slice(i, i + 4).forEach(f => fd.append('files', f));
+    try {
+      const r = await api('/api/upload', {method:'POST', body: fd});
+      out.insertAdjacentHTML('afterbegin', r.results.map(describe).join(''));
+    } catch (e) { out.insertAdjacentHTML('afterbegin', `<li class="err">${esc(e.message)}</li>`); }
+  }
+  const b = $('busy'); if (b) b.remove();
+  load();
+}
+function describe(r) {
+  const o = r.outcome, s = r.summary;
+  let t;
+  if (!o) t = badge('rejected', '인식 실패') + ` <span class="mut small">${esc(r.status)}</span>`;
+  else {
+    t = badge(o.kind === 'new' ? 'new' : o.kind, KIND_KO[o.kind] || o.kind);
+    if (o.subject) t += ` 과목 <b>${esc(o.subject)}</b>`;
+    else if (o.subject === null) t += ` <span class="tag warn">과목코드 미확인</span>`;
+    if (o.student_id) t += ` 수험번호 <b>${esc(o.student_id)}</b>`;
+    if (o.page !== null && o.page !== undefined) t += ` ${o.page + 1}페이지`;
+    if (o.reason) t += ` <span class="mut small">${esc(o.reason)}</span>`;
+    if (o.exam_id && o.exam_id !== EXAM_ID) t += ` <span class="tag warn">다른 과목 #${o.exam_id}</span>`;
+  }
+  return `<li style="padding:5px 0;border-bottom:1px solid #2a313b"><span class="mut small">${esc(r.filename)}</span> ${t}</li>`;
+}
+const drop = $('drop');
+['dragenter', 'dragover'].forEach(n => drop.addEventListener(n, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(n => drop.addEventListener(n, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => upload(e.dataTransfer.files));
+$('up').onchange = e => { upload(e.target.files); e.target.value = ''; };
+renderNav('exam');
+}
+</script></body></html>

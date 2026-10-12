@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamOMR - 스캔</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<div class="scan">
+  <div>
+    <div class="row" style="margin-bottom:8px">
+      <select id="exam"><option value="">모든 과목 (자동 분류)</option></select>
+      <select id="cam"></select>
+      <button id="start">시작</button>
+      <button id="torch" class="secondary" hidden>플래시</button>
+      <a href="/static/index.html">양식·과목</a>
+      <a id="dashlink" href="/static/index.html" hidden>대시보드</a>
+      <a id="conflink" href="#" hidden></a>
+      <a id="unlink" href="#" hidden></a>
+    </div>
+    <div class="stage" id="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="ov"></canvas>
+      <div class="banner"><span class="state idle" id="state">대기</span><span id="res"></span></div>
+      <div class="hint" id="hint">시작을 누르세요</div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div id="missed" class="err" style="font-weight:bold;margin-top:6px" hidden></div>
+  </div>
+  <div class="card"><h1>최근 스캔</h1><ul class="scans" id="recent"></ul></div>
+</div>
+<script src="/static/scan.js"></script>
+</body></html>

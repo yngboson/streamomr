@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamOMR - 미할당 스캔</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><header class="nav"></header>
+<main class="wide">
+<h1 id="h">미할당 스캔</h1>
+<p class="mut small" id="expl">수험번호를 읽지 못한 스캔입니다. 이름 칸과 판독 결과를 보고 수험번호를 지정하세요.
+  제안 목록은 이 페이지가 아직 없는 학생들입니다. 과목코드를 입력하면 그 과목으로 옮겨집니다 (원본 스캔은 그대로 남습니다).</p>
+<div id="msg"></div>
+<div class="grid2" id="list"></div>
+<datalist id="all"></datalist><datalist id="subjects"></datalist>
+</main>
+<script src="/static/common.js"></script>
+<script>
+if (needExam()) {
+function card(s) {
+  const digits = s.id_digits.map(d => `<span class="${d.value === null || d.value === undefined ? 'bad' : d.ambiguous ? 'amb' : ''}">${d.value === null || d.value === undefined ? '?' : d.value}</span>`).join('');
+  const sug = s.suggestions.slice(0, 12).map(x => `<span class="chip" data-fill="${esc(x)}" data-scan="${s.scan_id}">${esc(x)}</span>`).join('');
+  const sd = (s.subject_digits || []).map(d => `<span class="${d.value === null || d.value === undefined ? 'bad' : d.ambiguous ? 'amb' : ''}">${d.value === null || d.value === undefined ? '?' : d.value}</span>`).join('');
+  return `<div class="card">
+    <div class="row" style="justify-content:space-between"><b>스캔 #${s.scan_id} &middot; ${s.page + 1}페이지</b>
+      <span class="tag">${esc(SOURCE_KO[s.source] || s.source)}</span></div>
+    <div class="mut small">${fmtTime(s.created_at)}</div>
+    ${s.has_name_crop ? `<div class="imgbox crop"><img src="${img(s.scan_id, 'name_crop', 400)}" alt="이름" loading="lazy"></div>` : ''}
+    ${s.has_warped ? `<div class="imgbox"><a href="${img(s.scan_id, 'warped', 1600)}" target="_blank"><img src="${img(s.scan_id, 'warped', 700)}" loading="lazy" alt="정렬된 시트"></a></div>` : ''}
+    <div class="small mut">수험번호 판독 (? = 읽지 못함)</div><div class="digits">${digits}</div>
+    ${sd ? `<div class="small mut">과목코드 판독</div><div class="digits">${sd}</div>` : ''}
+    ${sug ? `<div class="small mut">제안 (이 페이지가 없는 학생)</div><div class="chips">${sug}</div>` : ''}
+    <div class="row">${sd ? `<input type="text" list="subjects" inputmode="numeric" placeholder="과목코드" data-subj="${s.scan_id}" style="width:100px">` : ''}
+      <input type="text" list="all" placeholder="수험번호${s.student_id_raw ? ' (' + esc(s.student_id_raw) + ')' : ''}" data-in="${s.scan_id}" style="width:170px">
+      <button data-assign="${s.scan_id}">지정</button></div></div>`;
+}
+async function load() {
+  try {
+    const d = await api(`/api/exams/${EXAM_ID}/unassigned`);
+    renderNav('unassigned', d.exam);
+    if (d.exam.subject === null) {
+      $('h').textContent = '과목코드 미확인 스캔';
+      $('expl').textContent = '과목코드를 읽지 못했거나 비워 둔 시트입니다. 이름 칸과 판독 결과를 보고 과목코드(와 필요하면 수험번호)를 입력하세요. 지정하면 그 과목으로 옮겨지고 원본 스캔은 기록으로 남습니다.';
+    }
+    $('subjects').innerHTML = (d.scans[0] ? d.scans[0].subjects || [] : []).map(x => `<option value="${esc(x)}">`).join('');
+    $('list').innerHTML = d.scans.map(card).join('') || '<div class="card okmsg">미할당 스캔이 없습니다.</div>';
+    $('all').innerHTML = (d.scans[0] ? d.scans[0].all_students : []).map(x => `<option value="${esc(x)}">`).join('');
+  } catch (e) { showMsg('msg', e.message, false); }
+}
+$('list').onclick = async ev => {
+  const chip = ev.target.closest('.chip');
+  if (chip) { document.querySelector(`[data-in="${chip.dataset.scan}"]`).value = chip.dataset.fill; return; }
+  const b = ev.target.closest('button[data-assign]'); if (!b) return;
+  const id = Number(b.dataset.assign);
+  const v = document.querySelector(`[data-in="${id}"]`).value.trim();
+  const sEl = document.querySelector(`[data-subj="${id}"]`), subj = sEl ? sEl.value.trim() : '';
+  if (!v && !subj) { showMsg('msg', '과목코드나 수험번호를 입력하세요.', false); return; }
+  b.disabled = true;
+  try {
+    const body = {};
+    if (v) body.student_id = v;
+    if (subj) body.subject = subj;
+    const o = await post(`/api/scans/${id}/route`, body);
+    showMsg('msg', `스캔 #${id} → ${subj ? '과목 ' + subj + ' ' : ''}${v ? '학생 ' + v : ''} (${KIND_KO[o.kind] || o.kind})`, true);
+    load();
+  } catch (e) { b.disabled = false; showMsg('msg', e.message, false); }
+};
+renderNav('unassigned');
+load();
+}
+</script></body></html>

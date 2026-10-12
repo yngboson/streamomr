@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamOMR - 충돌 검토</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><header class="nav"></header>
+<main class="wide">
+<h1>충돌 검토</h1>
+<p class="mut small">같은 학생·같은 페이지가 서로 다른 결과로 스캔되었습니다. 빨간 박스는 서로 다르게 읽힌 문항입니다.</p>
+<div id="msg"></div>
+<div id="list"></div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+if (needExam()) {
+let labels = [];
+function reading(a) {
+  if (!a) return '<span class="mut">-</span>';
+  return esc(labelsOf(a.marked, labels)) + (a.ambiguous ? ' <span class="tag warn">애매</span>' : '') +
+         (a.state === 'multi' ? ' <span class="tag warn">복수</span>' : '');
+}
+function scanCard(c, s, diffs) {
+  // questions in which this scan differs from the others
+  let qsSet = new Set();
+  diffs.forEach(d => { if (s.adopted || d.scan_ids.includes(s.scan_id)) d.questions.forEach(q => qsSet.add(q.question)); });
+  const hl = Array.from(qsSet).sort((a, b) => a - b);
+  const warped = s.has_warped ? `<a href="${img(s.scan_id, 'warped', 1600, 'highlight=' + hl.join(','))}" target="_blank"><img src="${img(s.scan_id, 'warped', 760, 'highlight=' + hl.join(','))}" loading="lazy" alt="정렬된 시트"></a>` : '<div class="mut">정렬 이미지 없음</div>';
+  const crop = s.has_name_crop ? `<div class="imgbox crop"><img src="${img(s.scan_id, 'name_crop', 400)}" alt="이름"></div>` : '';
+  return `<div class="card ${s.adopted ? 'sel' : ''}">
+    <div class="row" style="justify-content:space-between"><b>스캔 #${s.scan_id}</b>
+      <span>${s.adopted ? badge('ok', '현재 채택') : ''} <span class="tag">${esc(SOURCE_KO[s.source] || s.source)}</span></span></div>
+    <div class="mut small">${fmtTime(s.created_at)} &middot; 의심 문항 ${s.n_doubtful} &middot; 신뢰도 ${(s.mean_confidence * 100).toFixed(0)}%</div>
+    ${crop}<div class="imgbox">${warped}</div>
+    <div class="row" style="margin-top:8px">
+      <button data-act="adopt" data-sub="${c.id}" data-scan="${s.scan_id}">${s.adopted ? '이 스캔 유지(확정)' : '이 스캔 채택'}</button>
+      <button class="secondary" data-act="other" data-sub="${c.id}" data-scan="${s.scan_id}">다른 학생</button>
+    </div>
+    <div class="row" data-box="${c.id}-${s.scan_id}" hidden style="margin-top:6px">
+      <input type="text" placeholder="수험번호" data-in="${c.id}-${s.scan_id}" style="width:150px">
+      <button data-act="reassign" data-sub="${c.id}" data-scan="${s.scan_id}">이동</button>
+    </div></div>`;
+}
+function diffTable(c) {
+  return (c.diff || []).map(d => {
+    const rows = d.questions.map(q => `<tr class="diffq"><td>${q.question}</td><td>${reading(q.adopted)}</td><td>${reading(q.other)}</td></tr>`).join('');
+    return `<div class="tablewrap"><table class="t"><thead><tr><th>스캔 #${d.scan_ids.join(', #')} 와의 차이</th><th>채택된 스캔</th><th>다른 스캔</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join('');
+}
+function conflictCard(c) {
+  const sc = c.scans.slice().sort((a, b) => (b.adopted - a.adopted) || (a.scan_id - b.scan_id));
+  const minor = c.minor ? `${badge('minor', '사소한 차이')} <button data-act="adopt" data-sub="${c.id}" data-scan="${c.adopted_scan_id}">한 번에 수락</button>` : '';
+  return `<div class="card conf"><div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">학생 ${esc(c.student_id)} &middot; ${c.page + 1}페이지 <a class="small" href="/static/student.html?exam_id=${EXAM_ID}&student_id=${encodeURIComponent(c.student_id)}">학생 상세</a></h2>
+      <span>${minor}</span></div>
+    ${c.label ? `<div class="err small"><b>${esc(c.label)}</b> - 수험번호 마킹 오류일 수 있습니다 (일련번호 ${c.scans.map(s => s.serial ? 'No. ' + String(s.serial).padStart(4, '0') : '번호 없음').join(' / ')})</div>` : ''}
+    <div class="mut small">같은 결과 확인 횟수 ${c.confirm_count} &middot; 스캔 ${c.scans.length}장</div>
+    ${diffTable(c)}
+    <div class="grid2" style="margin-top:10px">${sc.map(s => scanCard(c, s, c.diff || [])).join('')}</div></div>`;
+}
+async function load() {
+  try {
+    const d = await api(`/api/exams/${EXAM_ID}/conflicts`);
+    labels = d.exam.choice_labels;
+    renderNav('conflicts', d.exam);
+    $('list').innerHTML = d.conflicts.map(conflictCard).join('') ||
+      '<div class="card okmsg">해결할 충돌이 없습니다.</div>';
+  } catch (e) { showMsg('msg', e.message, false); }
+}
+$('list').onclick = async ev => {
+  const b = ev.target.closest('button'); if (!b || !b.dataset.act) return;
+  const sub = Number(b.dataset.sub), scan = Number(b.dataset.scan);
+  try {
+    if (b.dataset.act === 'other') {
+      const box = document.querySelector(`[data-box="${sub}-${scan}"]`); box.hidden = !box.hidden; return;
+    }
+    b.disabled = true;
+    if (b.dataset.act === 'adopt') {
+      await post(`/api/submissions/${sub}/adopt`, {scan_id: scan});
+      showMsg('msg', `스캔 #${scan} 을(를) 채택했습니다.`, true);
+    } else if (b.dataset.act === 'reassign') {
+      const v = document.querySelector(`[data-in="${sub}-${scan}"]`).value.trim();
+      if (!v) { b.disabled = false; showMsg('msg', '수험번호를 입력하세요.', false); return; }
+      const o = await post(`/api/submissions/${sub}/reassign`, {scan_id: scan, student_id: v});
+      showMsg('msg', `스캔 #${scan} 을(를) 학생 ${v} 에게 이동했습니다 (${KIND_KO[o.kind] || o.kind}).`, true);
+    }
+    load();
+  } catch (e) { b.disabled = false; showMsg('msg', e.message, false); }
+};
+renderNav('conflicts');
+load();
+}
+</script></body></html>

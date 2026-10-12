@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamOMR - 학생 상세</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><header class="nav"></header>
+<main class="wide">
+<h1 id="title">학생</h1>
+<div id="msg"></div>
+<div class="card" id="summary"></div>
+<div class="card"><h2>답안</h2><p class="mut small">연한 빨강 = 오답, 연한 초록 = 정답, 주황 = 애매/복수 표시. 행을 눌러 답을 직접 고칠 수 있습니다 (원본 스캔은 그대로 보존됩니다).</p>
+  <div class="tablewrap"><table class="t"><thead><tr><th>문항</th><th>읽은 답</th><th>정답</th><th>점수</th><th>비고</th></tr></thead><tbody id="qbody"></tbody></table></div></div>
+<div class="card"><h2>이 학생의 스캔</h2><div class="grid2" id="scans"></div></div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+if (needExam()) {
+const SID = qs.get('student_id');
+let D = null, editing = null, draft = new Set();
+const L = () => D.exam.choice_labels;
+function accepted(q) { return (q.accepted || []).map(a => a.map(i => L()[i]).join('+')).join(' / '); }
+function qRow(q) {
+  const cls = q.ambiguous || q.state === 'multi' ? 'q-doubt' : q.correct === true ? 'q-right' : q.correct === false ? 'q-wrong' : '';
+  const tags = (q.source === 'override' ? '<span class="tag ovr">수정됨</span>' : '') +
+    (q.ambiguous ? '<span class="tag warn">애매</span>' : '') + (q.state === 'multi' ? '<span class="tag warn">복수</span>' : '') +
+    (q.state === null ? '<span class="tag warn">페이지 없음</span>' : '');
+  let res = q.graded ? (q.correct ? badge('ok', '정답') : badge('bad', '오답')) : '';
+  let h = `<tr class="click ${cls}" data-q="${q.number}"><td>${q.number}</td><td>${q.marked === null ? '-' : esc(labelsOf(q.marked, L()))}</td>
+    <td>${q.graded ? esc(accepted(q)) : '<span class="mut">-</span>'}</td>
+    <td>${q.graded ? res + ' ' + num(q.earned) + '/' + num(q.points) : ''}</td><td>${tags}</td></tr>`;
+  if (editing === q.number) {
+    const btns = L().map((l, i) => `<button type="button" class="cbtn ${draft.has(i) ? 'on' : ''}" data-c="${i}">${esc(l)}</button>`).join(' ');
+    h += `<tr><td colspan="5" style="white-space:normal;background:#232a33">
+      <div class="row"><b>${q.number}번 수정:</b> ${btns}
+        <button type="button" data-do="save">적용</button>
+        <button type="button" class="secondary" data-do="blank">무응답으로</button>
+        ${q.source === 'override' ? '<button type="button" class="secondary" data-do="clear">수정 해제</button>' : ''}
+        <button type="button" class="secondary" data-do="cancel">닫기</button></div></td></tr>`;
+  }
+  return h;
+}
+function render() {
+  const d = D, g = d.grade;
+  $('title').textContent = `학생 ${d.student_id}`;
+  const pages = d.pages.map(p => `<tr><td>${p.page + 1}</td><td>${p.present ? (p.status === 'conflict' ? badge('conflict', '충돌') : badge('ok', '있음')) : badge('incomplete', '없음')}</td>
+    <td>${p.adopted_scan_id ? '#' + p.adopted_scan_id : ''}</td><td>${p.confirm_count ?? ''}</td></tr>`).join('');
+  $('summary').innerHTML = `<div class="row" style="gap:18px">
+    <div>${statusBadge(d.status)}</div>
+    <div>${g ? `<b style="font-size:20px">${num(g.score)} / ${num(g.max_score)}</b> ${g.provisional ? badge('needs_review', '잠정') + ' <span class="mut small">' + esc(g.reasons.join(', ')) + '</span>' : ''}` : '<span class="mut">정답키가 없어 채점하지 않았습니다. <a href="/static/key.html?exam_id=' + EXAM_ID + '">정답키 설정</a></span>'}</div>
+    ${d.status === 'conflict' ? `<a href="/static/conflicts.html?exam_id=${EXAM_ID}">충돌 검토하기</a>` : ''}</div>
+    <div class="tablewrap"><table class="t" style="margin-top:8px"><thead><tr><th>페이지</th><th>상태</th><th>채택 스캔</th><th>확인 횟수</th></tr></thead><tbody>${pages}</tbody></table></div>`;
+  $('qbody').innerHTML = d.questions.map(qRow).join('');
+  $('scans').innerHTML = d.scans.map(s => `<div class="card" style="margin:0">
+    <div class="row" style="justify-content:space-between"><b>스캔 #${s.scan_id} &middot; ${s.page + 1}p</b>
+      <span>${s.adopted ? badge('ok', '채택') : ''} ${s.kind ? badge(s.kind, KIND_KO[s.kind] || s.kind) : ''}</span></div>
+    <div class="mut small">${esc(SOURCE_KO[s.source] || s.source)} &middot; ${fmtTime(s.created_at)}</div>
+    ${s.has_original ? `<a href="${img(s.scan_id, 'original')}" target="_blank"><img class="thumb" src="${img(s.scan_id, 'original', 360)}" loading="lazy" alt="원본"></a>` : ''}
+    ${s.has_warped ? `<div class="small"><a href="${img(s.scan_id, 'warped')}" target="_blank">정렬된 이미지</a></div>` : ''}
+    ${s.has_name_crop ? `<div class="imgbox crop"><img src="${img(s.scan_id, 'name_crop', 300)}" alt="이름"></div>` : ''}</div>`).join('') || '<div class="mut">없음</div>';
+  renderNav('exam', D.exam);
+}
+async function load() {
+  try {
+    D = await api(`/api/exams/${EXAM_ID}/students/${encodeURIComponent(SID)}`);
+    render();
+  } catch (e) { showMsg('msg', e.message, false); }
+}
+$('qbody').onclick = async ev => {
+  const cb = ev.target.closest('button[data-c]');
+  if (cb) { const i = Number(cb.dataset.c); draft.has(i) ? draft.delete(i) : draft.add(i); render(); return; }
+  const act = ev.target.closest('button[data-do]');
+  if (act) {
+    const q = D.questions.find(x => x.number === editing);
+    const what = act.dataset.do;
+    if (what === 'cancel') { editing = null; render(); return; }
+    const marked = what === 'save' ? Array.from(draft).sort((a, b) => a - b) : what === 'blank' ? [] : null;
+    try {
+      await post(`/api/submissions/${q.submission_id}/override`, {question: q.number, marked});
+      editing = null; showMsg('msg', `${q.number}번 답을 ${what === 'clear' ? '원래대로 되돌렸습니다' : '수정했습니다'}.`, true);
+      load();
+    } catch (e) { showMsg('msg', e.message, false); }
+    return;
+  }
+  const tr = ev.target.closest('tr.click'); if (!tr) return;
+  const q = D.questions.find(x => x.number === Number(tr.dataset.q));
+  if (q.submission_id === null) { showMsg('msg', '이 문항의 페이지가 스캔되지 않아 수정할 수 없습니다.', false); return; }
+  editing = editing === q.number ? null : q.number;
+  draft = new Set(q.marked || []);
+  render();
+};
+renderNav('exam');
+load();
+}
+</script></body></html>

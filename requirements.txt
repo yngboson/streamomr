@@ -1,0 +1,10 @@
+reportlab
+opencv-contrib-python
+numpy
+pytest
+pymupdf
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+cryptography

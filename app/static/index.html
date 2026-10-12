@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamOMR - 양식과 과목</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><header class="nav"></header>
+<main>
+<h1>답안지 양식 만들기</h1>
+<form class="card" id="f">
+  <p class="mut small">양식의 모든 정보(문항 수, 선지 수, 수험번호·과목코드 자릿수, 쪽수)는 시트 머리글에 인쇄됩니다.
+    그래서 <b>시험을 미리 등록하지 않아도</b> 어느 컴퓨터·휴대폰에서든 이 시트를 읽을 수 있고, 학생이 칠한 <b>과목코드</b>로 결과가 과목별로 자동 분류됩니다.</p>
+  <label>제목 (시트에 인쇄, 선택) <input name="title" type="text" value="" style="width:100%"></label>
+  <div class="row">
+    <label>문항 수 <input name="questions" type="number" min="1" max="1023" value="45" style="width:90px"></label>
+    <label>실제 사용 문항 수 (선택) <input name="used" type="number" min="1" style="width:90px" placeholder="전부"></label>
+    <label>선지 수 <input name="choices" type="number" min="2" max="10" value="5" style="width:80px"></label>
+    <label>선지 표시 <select name="labels"><option value="1">1 2 3 4 5</option><option value="A">A B C D E</option><option value="a">a b c d e</option><option value="가">가 나 다 라 마</option></select></label>
+  </div>
+  <div class="row">
+    <label>수험번호 자릿수 <input name="id_digits" type="number" min="1" max="12" value="8" style="width:80px"></label>
+    <label>과목코드 자릿수 (0 = 없음) <input name="subject_digits" type="number" min="0" max="3" value="2" style="width:80px"></label>
+    <label>쪽수 (선택) <input name="pages" type="number" min="1" max="16" style="width:80px" placeholder="자동"></label>
+    <label>버블 크기 <select name="bubble"><option>4</option><option>4.25</option><option>4.5</option><option>4.75</option><option>5</option><option>5.25</option><option>5.5</option><option>5.75</option></select></label>
+  </div>
+  <p class="mut small">예: 100문항 양식 2쪽 중 80문항만 쓰려면 문항 수 100, 실제 사용 80, 쪽수 2. 쓰지 않는 문항은 인쇄도 인식도 하지 않습니다.
+    문항은 쪽수로 균등하게 나뉩니다. 선지 표시는 위 네 가지 중에서 고릅니다.</p>
+  <div class="row">
+    <button type="button" id="pdf">PDF 다운로드(원본)</button>
+    <span class="mut small">A4, 배율 100%("실제 크기")로 인쇄하세요. 복사기로 복사해도 됩니다.</span>
+  </div>
+  <div class="row small" style="margin-top:8px">
+    <label>번호 인쇄본 부수 <input type="number" min="1" max="500" value="30" id="copies" style="width:70px"></label>
+    <label>시작 번호 (선택) <input type="number" min="1" max="4095" id="start" style="width:70px"></label>
+    <button type="button" class="secondary" id="numbered">번호 인쇄본 PDF</button>
+  </div>
+  <p class="mut small">번호 인쇄본: 학생 1명 분량(전체 쪽)이 한 세트이고 세트마다 'No. 0001' 같은 일련번호가 인쇄됩니다.
+    시작 번호를 비우면 이 양식의 이전 인쇄 다음 번호부터 이어집니다.</p>
+  <div id="info" class="small" style="margin:6px 0"></div>
+  <div class="imgbox"><a id="pvlink" target="_blank"><img id="pv" alt="1쪽 미리보기" style="max-width:340px"></a></div>
+  <div class="row" style="margin-top:10px">
+    <label style="margin:0">과목코드 <input id="presubject" type="text" inputmode="numeric" style="width:70px" placeholder="예: 07"></label>
+    <button type="button" class="secondary" id="precreate">이 양식의 과목 미리 만들기</button>
+    <span class="mut small">정답키를 스캔 전에 입력하고 싶을 때만 필요합니다. 스캔하면 과목은 자동으로 만들어집니다.</span>
+  </div>
+  <div id="msg" style="margin-top:6px"></div>
+</form>
+
+<h1>과목 목록</h1>
+<p class="mut small">시트의 과목코드가 처음 읽힐 때 과목이 자동으로 생깁니다. 제목은 ✎ 로 바꿀 수 있습니다.
+  과목코드를 읽지 못한 시트는 양식마다 "과목코드 미확인" 항목에 모이고, 거기서 사람이 과목을 지정합니다.</p>
+<div id="exams" class="grid2"></div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+renderNav('home');
+function formParams() {
+  const p = new URLSearchParams();
+  new FormData($('f')).forEach((v, k) => { v = String(v).trim(); if (v !== '') p.set(k, v); });
+  return p;
+}
+function formBody() {
+  const b = {};
+  formParams().forEach((v, k) => { b[k] = ['title', 'labels'].includes(k) ? v : Number(v); });
+  return b;
+}
+let infoTimer = null;
+function refreshInfo() {
+  clearTimeout(infoTimer);
+  infoTimer = setTimeout(async () => {
+    try {
+      const i = await post('/api/forms/info', formBody());
+      $('info').innerHTML = `양식: <b>${esc(i.description)}</b> <span class="mut">(${esc(i.form_key)}, 쪽당 ${i.questions_per_page.join('/')}문항)</span>`;
+      $('pv').src = '/api/forms/preview.png?' + formParams() + '&page=0&dpi=60';
+      $('pvlink').href = '/api/forms/preview.png?' + formParams() + '&page=0&dpi=110';
+    } catch (e) { $('info').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  }, 350);
+}
+$('f').addEventListener('input', refreshInfo);
+$('f').onsubmit = ev => ev.preventDefault();
+$('pdf').onclick = () => { location.href = '/api/forms/pdf?' + formParams(); };
+$('numbered').onclick = async ev => {
+  const b = ev.target; b.disabled = true;
+  try {   // issuing numbers is an explicit POST; the PDF itself can be fetched again any time
+    const body = Object.assign(formBody(), {copies: Number($('copies').value)});
+    if ($('start').value) body.start = Number($('start').value);
+    const r = await post('/api/forms/print-runs', body);
+    showMsg('msg', `No. ${String(r.serials[0]).padStart(4, '0')} ~ ${String(r.serials[r.serials.length - 1]).padStart(4, '0')} 을(를) 발행했습니다.`, true);
+    location.href = r.pdf_url;
+  } catch (e) { showMsg('msg', '발행할 수 없습니다: ' + e.message, false); }
+  b.disabled = false;
+};
+$('precreate').onclick = async () => {
+  try {
+    const body = Object.assign(formBody(), {subject: $('presubject').value.trim()});
+    const e = await post('/api/exams', body);
+    showMsg('msg', `과목 #${e.id} (${e.subject_label || e.title}) 을(를) 만들었습니다.`, true);
+    load();
+  } catch (e) { showMsg('msg', '만들 수 없습니다: ' + e.message, false); }
+};
+
+function card(e) {
+  const x = `exam_id=${e.id}`;
+  return `<div class="card">
+    <h2>#${e.id} ${esc(e.title)} <button type="button" class="secondary" data-rename="${e.id}" title="제목 바꾸기">✎</button></h2>
+    <p class="small"><b>${esc(e.subject_label || '과목코드 없는 양식')}</b> &middot; <span class="mut">${esc(e.form_desc)}</span></p>
+    <p class="small">학생 ${e.n_students}명 &middot; 스캔 ${e.n_scans}장 &middot;
+      충돌 <b class="${e.n_conflicts ? 'err' : ''}">${e.n_conflicts}</b> &middot; ${e.subject === null ? '<b class="err">분류 대기</b>' : '미할당'} <b>${e.n_unassigned}</b> &middot;
+      정답키 ${e.has_key ? '있음' : '<span class="mut">없음</span>'}</p>
+    <div class="row">
+      <a href="/static/exam.html?${x}">대시보드</a>
+      <a href="/static/scan.html?${x}">이 과목만 스캔</a>
+      <a href="/static/unassigned.html?${x}">${e.subject === null ? '과목 지정' : '미할당'}</a>
+      ${e.subject === null ? '' : `<a href="/static/key.html?${x}">정답키</a>`}
+    </div></div>`;
+}
+document.addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-rename]'); if (!b) return;
+  const t = prompt('새 제목');
+  if (!t || !t.trim()) return;
+  try { await api(`/api/exams/${b.dataset.rename}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: t.trim()})}); load(); }
+  catch (e) { showMsg('msg', e.message, false); }
+});
+async function load() {
+  try {
+    const ex = await api('/api/exams');
+    $('exams').innerHTML = ex.map(card).join('') || '<div class="card mut">아직 과목이 없습니다. 시트를 스캔하면 과목코드별로 자동으로 만들어집니다. <a href="/static/scan.html">스캔 시작</a></div>';
+  } catch (e) { $('exams').innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
+}
+load();
+refreshInfo();
+</script></body></html>
