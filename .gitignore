@@ -6,3 +6,4 @@ data/
 out/
 realasset/
 node_modules/
+.claude/
