@@ -49,6 +49,11 @@ RING_MODULES = 0.6                       # white model ring: this far outside th
 MIN_FOR_STOP = 3                         # markers of one page group that end the search early
 SAME_PLACE = 0.35                        # same id counts as the same detection if centres are within this * marker side
 
+FLAT_BG_FRAC = 1 / 10                    # lighting-flattened last-resort pass: background = max filter of this fraction of the short side ...
+FLAT_MIN_CANDIDATES = 4                  # ... and the plain pass rejected at least this many marker-like quads
+FLAT_SCALE = 8                           # ... measured on a copy this much smaller
+FLAT_DENOISE_SIGMA = 1.2                 # ... blurred, then a light denoise (dim frames carry sensor noise)
+
 _tls = threading.local()
 
 
@@ -192,6 +197,21 @@ def _redecode(m: "_Merge", gray: np.ndarray, imgs, rejected, min_side: float) ->
             break
 
 
+def flatten_lighting(gray: np.ndarray) -> np.ndarray:
+    """gray / local paper level, stretched to 0..255: a dim, shadowed or gradient-lit frame gets the contrast of a lit one.
+
+    The background is a max filter wider than any marker followed by a blur (a marker's black border never reaches it),
+    computed on a 1/FLAT_SCALE copy (the full-size max filter costs ~250 ms at 1080p).  Only a last resort: a max filter
+    spreads a hard shadow edge, which the normal passes handle better."""
+    h, w = gray.shape[:2]
+    small = cv2.resize(gray, (max(w // FLAT_SCALE, 1), max(h // FLAT_SCALE, 1)), interpolation=cv2.INTER_AREA)
+    k = max(5, int(min(small.shape[:2]) * FLAT_BG_FRAC) | 1)
+    bg = cv2.GaussianBlur(cv2.dilate(small, np.ones((k, k), np.uint8)), (0, 0), k / 3.0)
+    bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    flat = np.clip(gray.astype(np.float32) / np.maximum(bg, 8.0) * 235.0, 0, 255)
+    return cv2.GaussianBlur(flat, (0, 0), FLAT_DENOISE_SIGMA).astype(np.uint8)
+
+
 def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:
     """-> (id -> 4x2 corners (TL, TR, BR, BL), duplicate/inconsistent id seen, info).
 
@@ -199,6 +219,7 @@ def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[st
     det = _detector()
     m = _Merge()
     corners, ids, rej = det.detectMarkers(gray)
+    n_rej0 = len(rej)
     m.add(corners, ids)
     passes, used = 1, 0
     min_side = lay.MARKER_MM * MIN_PPM                   # smaller quads cannot be a readable marker of the sheet
@@ -227,4 +248,19 @@ def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[st
             if m.solid():
                 used = k
                 break
+    if not m.solid() and (m.found or n_rej0 >= FLAT_MIN_CANDIDATES):   # last resort on a lighting-flattened copy (dim / shadowed / gradient-lit frame);
+        # only when something marker-like is in view: an empty scene must stay cheap (every idle frame of a stream passes here)
+        flat = flatten_lighting(gray)
+        c3, i3, rej = det.detectMarkers(flat)
+        m.add(c3, i3)
+        passes += 1
+        if not m.solid():
+            _redecode(m, gray, (gray, flat), rej, min_side)
+        if m.found and not m.solid():
+            k = _kernel(m.module_px(), KERNEL_OF_MODULE)
+            c4, i4, rej = det.detectMarkers(cv2.morphologyEx(flat, cv2.MORPH_OPEN, np.ones((k, k), np.uint8)))
+            m.add(c4, i4)
+            passes += 1
+        if m.solid():
+            used = -1
     return m.found, m.dup, {"detect_passes": float(passes), "detect_kernel": float(used)}

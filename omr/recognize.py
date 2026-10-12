@@ -301,6 +301,13 @@ def _read_serial(warped: np.ndarray, ppm: float):
 # =============================================================================== self-describing header
 HEADER_SEARCH_MM = 2.0       # local registration window of a header row (paper bow / curl near the top edge); < half a row pitch
 HEADER_BAND_MM = 1.0         # white paper band above / below a row used as that row's local paper level
+HEADER_WIDE_SEARCH_MM = (4.0, 2.6)   # (dx, dy) retry window when the sheet is warped from only 3 corner markers or the first pass failed: the
+                                     # extrapolated corner (paper curl / bow) moves the far end of the header 2-3 mm; dy stays < half a row pitch
+HEADER_WIDE_DISAGREE_MM = (3.5, 2.8) # ... and the two ends may then differ this much (dx, dy)
+TRACK_SEG, TRACK_HOP = 8, 4          # tracked retry: windows of 8 cells, every 4 cells
+TRACK_STEP_MM = 1.2                  # ... each searched this far around the previous window's offset
+TRACK_FIRST_MM = 3.0                 # ... the first one this far around the nominal position (< half the row pitch)
+TRACK_MIN_CONTRAST = 40.0            # flat-field gray levels (paper = 235): bright bands minus dark band needed to trust a window
 HEADER_FLIP_CANDIDATES = 3   # least-certain data cells that may be flipped (singly or in pairs) to satisfy the CRC ...
 HEADER_FLIP_MARGIN = 0.3     # ... only when they are this close to the threshold (fraction of the black-white contrast)
 
@@ -314,7 +321,7 @@ def _box_mean(ii, x0, y0, x1, y1) -> float:
     return float((ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]) / ((x1 - x0) * (y1 - y0)))
 
 
-def _register_row(ii, ppm, row, guard, side):
+def _register_row(ii, ppm, row, guard, side, search=(HEADER_SEARCH_MM, HEADER_SEARCH_MM), dy_fixed=None):
     """(dx, dy) in mm that put the nominal header row on the printed one, at one end of the row.
 
     Edge-based and independent of the data bits: dy maximises the darkness inside the row's band against the white
@@ -326,19 +333,19 @@ def _register_row(ii, ppm, row, guard, side):
     xs1 = row[n_end - 1][0] + w if side == "L" else row[-1][0] + w
     step = 1.0 / ppm
     best = (-1e9, 0.0)
-    for dy in np.arange(-HEADER_SEARCH_MM, HEADER_SEARCH_MM + 1e-9, step):
+    for dy in ([] if dy_fixed is not None else np.arange(-search[1], search[1] + 1e-9, step)):
         inside = _box_mean(ii, xs0 * ppm, (y + dy + 0.15 * h) * ppm, xs1 * ppm, (y + dy + 0.85 * h) * ppm)
         above = _box_mean(ii, xs0 * ppm, (y + dy - 0.2 - HEADER_BAND_MM) * ppm, xs1 * ppm, (y + dy - 0.2) * ppm)
         below = _box_mean(ii, xs0 * ppm, (y + dy + h + 0.2) * ppm, xs1 * ppm, (y + dy + h + 0.2 + HEADER_BAND_MM) * ppm)
         score = min(above, below) - inside       # bright bands around a dark band
         if score > best[0]:
             best = (score, float(dy))
-    dy = best[1]
+    dy = best[1] if dy_fixed is None else dy_fixed
     # horizontal: guard cells + one white cell beyond the end, as a +1 (black) / -1 (white) template
     pat = ([False] + list(guard)) if side == "L" else (list(guard) + [False])
     x_first = (row[0][0] - w) if side == "L" else row[-len(guard)][0]
     best = (-1e9, 0.0)
-    for dx in np.arange(-HEADER_SEARCH_MM, HEADER_SEARCH_MM + 1e-9, step):
+    for dx in np.arange(-search[0], search[0] + 1e-9, step):
         vals = np.array([_box_mean(ii, (x_first + dx + (i + 0.25) * w) * ppm, (y + dy + 0.2 * h) * ppm,
                                    (x_first + dx + (i + 0.75) * w) * ppm, (y + dy + 0.8 * h) * ppm) for i in range(len(pat))])
         sign = np.where(pat, -1.0, 1.0)          # bright where white, dark where black
@@ -348,7 +355,78 @@ def _register_row(ii, ppm, row, guard, side):
     return best[1], dy
 
 
+HEADER_FLAT_MARGIN_MM = 4.0  # paper sampled this far above / below the header rows for the flat field
+HEADER_FLAT_PCT = 85         # printed black covers < 50 % of any column of that window, so this percentile is paper
+HEADER_FLAT_SIGMA_MM = 1.2   # smoothing of the per-column paper level along the row
+
+
+def _flatten_header(warped: np.ndarray, ppm: float) -> np.ndarray:
+    """float32 copy of the canvas whose header band is divided by the paper level of its own column.
+
+    Registration and thresholds then see a lighting-independent picture: a hard shadow edge, glare or a gradient *along*
+    the row (the usual case: the header spans 144 mm) becomes a flat white background, where the raw picture has two
+    different "papers" and a ``bright band - dark band`` score picks the edge instead of the cells.  Per column, not
+    per pixel: the black cells never cover half of a column of the window, so a high percentile is the paper itself."""
+    rows = lay.header_cell_rects()
+    y0 = max(int(round((rows[0][0][1] - HEADER_FLAT_MARGIN_MM) * ppm)), 0)
+    y1 = min(int(round((rows[-1][0][1] + rows[-1][0][3] + HEADER_FLAT_MARGIN_MM) * ppm)), warped.shape[0])
+    out = warped.astype(np.float32)
+    band = out[y0:y1]
+    paper = np.percentile(band, HEADER_FLAT_PCT, axis=0).astype(np.float32)
+    paper = cv2.GaussianBlur(paper.reshape(1, -1), (0, 0), HEADER_FLAT_SIGMA_MM * ppm).reshape(-1)
+    out[y0:y1] = np.clip(band / np.maximum(paper, 8.0) * 235.0, 0, 255)
+    return out
+
+
+def _track_dy(ii, ppm, row, first_search: float):
+    """Vertical offset (mm) of one header row at every cell, followed along the row.
+
+    A sheet warped from three corners (or a bowed / rotated one) can have its header run 5 mm uphill over its 144 mm: far more
+    than a two-end registration may search without jumping onto the other row (pitch 5.5 mm).  The vertical profile of a
+    window of SEG cells (bright band - dark band - bright band, as in _register_row, independent of the data bits) is
+    searched +-TRACK_STEP_MM around the previous window's offset, starting with the widest search at the left end.  A window
+    with no dark cells (all-white data bits) has no contrast: the previous offset is kept."""
+    n = len(row)
+    x, y, w, h = row[0]
+    step = 1.0 / ppm
+    centres, dys = [], []
+    prev = 0.0
+    for k, i0 in enumerate(sorted(set(list(range(0, n - TRACK_SEG + 1, TRACK_HOP)) + [n - TRACK_SEG]))):
+        xs0, xs1 = row[i0][0], row[i0 + TRACK_SEG - 1][0] + w
+        half = first_search if k == 0 else TRACK_STEP_MM
+        best = (-1e9, prev)
+        for dy in np.arange(prev - half, prev + half + 1e-9, step):
+            inside = _box_mean(ii, xs0 * ppm, (y + dy + 0.15 * h) * ppm, xs1 * ppm, (y + dy + 0.85 * h) * ppm)
+            above = _box_mean(ii, xs0 * ppm, (y + dy - 0.2 - HEADER_BAND_MM) * ppm, xs1 * ppm, (y + dy - 0.2) * ppm)
+            below = _box_mean(ii, xs0 * ppm, (y + dy + h + 0.2) * ppm, xs1 * ppm, (y + dy + h + 0.2 + HEADER_BAND_MM) * ppm)
+            score = min(above, below) - inside
+            if score > best[0]:
+                best = (score, float(dy))
+        if best[0] >= TRACK_MIN_CONTRAST:
+            prev = best[1]
+        centres.append(i0 + (TRACK_SEG - 1) / 2.0)
+        dys.append(prev)
+    return np.interp(np.arange(n), centres, dys)
+
+
 def _read_header(warped: np.ndarray, ppm: float):
+    """Header decode with a wider registration retry (see _read_header_pass); the CRC-16 judges every attempt."""
+    flat = _flatten_header(warped, ppm)
+    ii = cv2.integral(flat, sdepth=cv2.CV_64F)
+    h, info = _read_header_pass(flat, ii, ppm, (HEADER_SEARCH_MM, HEADER_SEARCH_MM), (1.2, 1.5))
+    if h is None and info.get("meta_contrast", 1.0) >= META_MIN_CONTRAST:
+        h2, info2 = _read_header_pass(flat, ii, ppm, HEADER_WIDE_SEARCH_MM, HEADER_WIDE_DISAGREE_MM)
+        if h2 is not None:
+            info2["header_wide"] = 1.0
+            return h2, info2
+        h3, info3 = _read_header_pass(flat, ii, ppm, HEADER_WIDE_SEARCH_MM, (HEADER_WIDE_DISAGREE_MM[0], 8.0), track=True)
+        if h3 is not None:
+            info3["header_tracked"] = 1.0
+            return h3, info3
+    return h, info
+
+
+def _read_header_pass(flat: np.ndarray, ii: np.ndarray, ppm: float, search, disagree, track=False):
     """Decode the two-row self-describing header.  Returns (Header | None, info).
 
     Each row is registered locally at both ends (_register_row) and the cell positions are interpolated along it,
@@ -358,7 +436,6 @@ def _read_header(warped: np.ndarray, ppm: float):
     fails, the few least-certain cells may be flipped (cells that sit almost exactly on the threshold, e.g. under a
     toner streak); CRC-16 keeps the chance of accepting a wrong header with these few tries around 1e-4 per failed
     frame, and a wrong layout is caught by the page check and the ring alignment downstream."""
-    ii = cv2.integral(warped.astype(np.float32), sdepth=cv2.CV_64F)
     rows = lay.header_cell_rects()
     n = mk.HEADER_ROW_CELLS
     g0, g1 = len(mk.HEADER_START_GUARD), len(mk.HEADER_STOP_GUARD)
@@ -368,15 +445,16 @@ def _read_header(warped: np.ndarray, ppm: float):
     black_guard = {i for i, b in enumerate(mk.HEADER_START_GUARD) if b} | \
         {n - g1 + i for i, b in enumerate(mk.HEADER_STOP_GUARD) if b}
     for r, row in enumerate(rows):
-        dxl, dyl = _register_row(ii, ppm, row, mk.HEADER_START_GUARD, "L")
-        dxr, dyr = _register_row(ii, ppm, row, mk.HEADER_STOP_GUARD, "R")
-        if abs(dxr - dxl) > 1.2 or abs(dyr - dyl) > 1.5:     # the two ends disagree beyond any plausible bow
+        dys = _track_dy(ii, ppm, row, TRACK_FIRST_MM) if track else None
+        dxl, dyl = _register_row(ii, ppm, row, mk.HEADER_START_GUARD, "L", search, None if dys is None else float(dys[0]))
+        dxr, dyr = _register_row(ii, ppm, row, mk.HEADER_STOP_GUARD, "R", search, None if dys is None else float(dys[-1]))
+        if abs(dxr - dxl) > disagree[0] or abs(dyr - dyl) > disagree[1]:     # the two ends disagree beyond any plausible bow
             info["header_reg_mm"] = float(max(abs(dxr - dxl), abs(dyr - dyl)))
             return None, info
         d = np.empty(n)
         for i, (x, y, w, h) in enumerate(row):
             t = i / (n - 1)
-            dx, dy = dxl + (dxr - dxl) * t, dyl + (dyr - dyl) * t
+            dx, dy = dxl + (dxr - dxl) * t, (dyl + (dyr - dyl) * t if dys is None else float(dys[i]))
             cell = _box_mean(ii, (x + dx + 0.25 * w) * ppm, (y + dy + 0.2 * h) * ppm, (x + dx + 0.75 * w) * ppm,
                              (y + dy + 0.8 * h) * ppm)
             up = _box_mean(ii, (x + dx + 0.1 * w) * ppm, (y + dy - 0.25 - HEADER_BAND_MM) * ppm, (x + dx + 0.9 * w) * ppm,
@@ -387,8 +465,8 @@ def _read_header(warped: np.ndarray, ppm: float):
             d[i] = 1.0 - cell / paper
             if i in black_guard:   # printed black: darker quartile of the cell's pixels (robust to white toner streaks)
                 y0_, x0_ = int(round((y + dy + 0.2 * h) * ppm)), int(round((x + dx + 0.2 * w) * ppm))
-                c = warped[max(y0_, 0):max(int(round((y + dy + 0.8 * h) * ppm)), y0_ + 1),
-                           max(x0_, 0):max(int(round((x + dx + 0.8 * w) * ppm)), x0_ + 1)]
+                c = flat[max(y0_, 0):max(int(round((y + dy + 0.8 * h) * ppm)), y0_ + 1),
+                         max(x0_, 0):max(int(round((x + dx + 0.8 * w) * ppm)), x0_ + 1)]
                 if c.size:
                     blacks.append(1.0 - float(np.percentile(c, BLACK_PERCENTILE)) / paper)
         sb = [i for i, b in enumerate(mk.HEADER_START_GUARD) if b]
