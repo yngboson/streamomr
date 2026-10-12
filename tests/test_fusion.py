@@ -38,7 +38,9 @@ def remake(r, FA=None, FI=None, SI=None, SA=None, FS=None, SS=None):
     """Copy of frame result `r` with edited raw measurements and decisions recomputed from them."""
     pick = lambda new, old: None if old is None else (old if new is None else new).copy()
     raw = dataclasses.replace(r.raw, SA=pick(SA, r.raw.SA), FA=pick(FA, r.raw.FA), FI=pick(FI, r.raw.FI), SI=pick(SI, r.raw.SI),
-                              FS=pick(FS, r.raw.FS), SS=pick(SS, r.raw.SS))
+                              FS=pick(FS, r.raw.FS), SS=pick(SS, r.raw.SS),
+                              MA=r.raw.MA if FA is None else None, MI=r.raw.MI if FI is None else None,
+                              MS=r.raw.MS if FS is None else None)   # edited fills stand alone: no relative-rule measure (omr.recognize REL_MARGIN)
     out = copy.copy(r)
     out.raw = raw
     d = decide_page(raw)

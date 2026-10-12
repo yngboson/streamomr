@@ -49,7 +49,7 @@ def test_layout_valid(name):
     t = CONFIGS[name]
     lay = build_layout(t)
     assert sum(lay.questions_per_page) == (t.used or t.questions)
-    assert lay.form_key == lay.header(0).form_key and lay.form_id is None and lay.version == 1
+    assert lay.form_key == lay.header(0).form_key and lay.form_id is None and lay.version == (2 if lay.template.tracks else 1)
     nxt = 1
     for pg in lay.pages:
         assert pg.first_question == nxt

@@ -57,11 +57,11 @@ def test_forms_are_stateless_and_numbered_runs_are_per_form(env):
     q = "questions=100&used=80&pages=2&choices=5&labels=A&id_digits=8&subject_digits=2&title=T"
     n_exams = len(c.get("/api/exams").json())
     r = c.get(f"/api/forms/pdf?{q}")
-    assert r.status_code == 200 and r.content[:4] == b"%PDF" and "Q100U80C5D8S2P2L1B0V1" in r.headers["content-disposition"]
+    assert r.status_code == 200 and r.content[:4] == b"%PDF" and "Q100U80C5D8S2P2L1B0V2" in r.headers["content-disposition"]
     assert c.get(f"/api/forms/pdf?{q}").content == r.content
     assert len(c.get("/api/exams").json()) == n_exams                         # printing created nothing in the database
     info = c.post("/api/forms/info", json={"questions": 100, "used": 80, "pages": 2, "labels": "A"}).json()
-    assert info["form_key"] == "Q100U80C5D8S2P2L1B0V1" and info["total_pages"] == 2 and info["questions_per_page"] == [50, 30]
+    assert info["form_key"] == "Q100U80C5D8S2P2L1B0V2" and info["total_pages"] == 2 and info["questions_per_page"] == [50, 30]
     assert "80문항" in info["description"]
     pv = c.get(f"/api/forms/preview.png?{q}&page=1")
     assert pv.status_code == 200 and pv.content[:4] == b"\x89PNG" and c.get(f"/api/forms/preview.png?{q}&page=2").status_code == 404

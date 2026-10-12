@@ -19,6 +19,7 @@ Pure: no I/O, no clock.
 from __future__ import annotations
 
 import copy
+import warnings
 from collections import Counter, deque
 from typing import Optional, Tuple
 
@@ -82,13 +83,23 @@ class Track:
             fr = list(self.frames)
             med = lambda f: np.median(np.stack([getattr(x, f) for x in fr]), axis=0)
             r0 = fr[-1]
+
+            def nanmed(f):    # disc darkness (relative rule): NaN = unknowable bubble; a frame without it does not vote; None when no frame has it
+                have = [getattr(x, f) for x in fr if getattr(x, f) is not None]
+                if not have:
+                    return None
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    return np.nanmedian(np.stack(have), axis=0)
+
             subj = {}
             if r0.FS is not None:    # same form on every frame of a track (form_key), so FS is present on all or none
-                subj = dict(FS=med("FS"), SS=med("SS"))
+                subj = dict(FS=med("FS"), SS=med("SS"), MS=nanmed("MS"))
             self._raw = PageRaw(r0.numbers, r0.labels, r0.digit_index, med("FA"), med("SA"), med("FI"), med("SI"),
                                 float(np.median([x.ink for x in fr])), float(np.median([x.min_strength for x in fr])), True,
                                 ink_source="default" if any(x.ink_source == "default" for x in fr) else "auto",
-                                ink_separation=float(np.median([x.ink_separation for x in fr])), **subj)
+                                ink_separation=float(np.median([x.ink_separation for x in fr])),
+                                MA=nanmed("MA"), MI=nanmed("MI"), **subj)
         return self._raw
 
     def decisions(self):

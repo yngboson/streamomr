@@ -15,7 +15,7 @@ import shutil
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYODIDE_VERSION = "0.27.7"      # ships numpy 2.0.2 + opencv-python 4.10 (with cv2.aruco)
 PYODIDE_BASE = f"https://cdn.jsdelivr.net/pyodide/v{PYODIDE_VERSION}/full/"
-OMR_MODULES = ["__init__", "markers", "layout", "detect", "illum", "ink", "recognize", "fusion", "identity", "stream"]
+OMR_MODULES = ["__init__", "markers", "layout", "detect", "illum", "ink", "tracks", "recognize", "fusion", "identity", "stream"]
 CSS_KEEP = re.compile(r"^(:root|\*|body|a |h1|\.card|label|input|button|\.row|\.scan|@media \(max-width:760px\)|\.stage|\.banner|\.state|\.hint|\.stats|ul\.scans|\.badge|\.mut|\.small|\.err|\.tag)")
 
 

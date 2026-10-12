@@ -68,3 +68,107 @@ def test_ink_choice_is_recorded_and_fused_conservatively():
     assert fr.ink_source == "auto" and abs(fr.ink_separation - 0.2) < 1e-9
     tr.add(Fr(_raw("default", 0.0)), 0.3, None)
     assert tr.fused_raw().ink_source == "default"     # one frame without evidence: the whole track keeps the default rule
+
+
+# ---------------------------------------------------------------- relative rule (REL_MARGIN): faint marks beside blank choices
+def _faint_row(n=5, k=2, excess=0.2, fill=0.3, strength=0.5):
+    """A row whose absolute rules cannot call (low fill / strength) but where choice k is `excess` darker than the rest."""
+    f, st, md = np.zeros(n), np.zeros(n), np.full(n, 0.04)
+    f[k], st[k], md[k] = fill, strength, 0.04 + excess
+    return f, st, md
+
+
+def test_relative_rule_reads_a_faint_mark_the_absolute_rules_only_guess():
+    f, st, md = _faint_row(excess=0.22)
+    assert R._decide(f, st, CAL)[2:] == (0.2, True)                         # before: a flagged guess at best
+    state, marked, conf, amb = R._decide(f, st, CAL, md=md)
+    assert (state, marked, amb) == ("single", [2], False) and conf > 0.5
+
+
+def test_relative_rule_close_to_the_margin_is_read_but_flagged():
+    f, st, md = _faint_row(excess=R.REL_MARGIN + 0.01)
+    state, marked, conf, amb = R._decide(f, st, CAL, md=md)
+    assert (state, marked, amb) == ("single", [2], True)
+    f, st, md = _faint_row(excess=R.REL_MARGIN - 0.02)                      # below 15 points: nothing new
+    assert R._decide(f, st, CAL, md=md) == R._decide(f, st, CAL)
+    assert R._decide(np.zeros(5), np.zeros(5), CAL, md=np.full(5, 0.05))[0] == "blank"
+
+
+def test_relative_rule_two_faint_marks_are_a_multi_mark():
+    f, st, md = _faint_row(excess=0.25)
+    md[4] = 0.04 + 0.25                                                    # a second faint mark; the median of the others stays blank
+    state, marked, conf, amb = R._decide(f, st, CAL, md=md)
+    assert (state, marked, amb) == ("multi", [2, 4], False)
+
+
+def test_relative_rule_never_changes_a_row_with_a_confident_absolute_mark():
+    f, st = np.array([0.0, 0.95, 0.0, 0.0, 0.0]), np.array([0, 1.0, 0, 0, 0.0])
+    md = np.array([0.04, 0.8, 0.04, 0.3, 0.04])                           # an erased ghost beside a real mark: 0.26 above the rest
+    assert R._decide(f, st, CAL, md=md) == R._decide(f, st, CAL) and R._decide(f, st, CAL)[1] == [1]
+
+
+def test_relative_rule_leaves_unknowable_rows_and_partial_marks_alone():
+    f, st, md = _faint_row(excess=0.3)
+    md[0] = np.nan                                                         # glare / shadow edge on a bubble of the row
+    assert R._decide(f, st, CAL, md=md) == R._decide(f, st, CAL)
+    D = np.full((5, 60), 0.03, np.float32)
+    D[1, :20] = 0.6                                                        # half-filled dark bubble: dark on a third of the disc
+    D[2] = 0.25                                                            # complete faint mark
+    D[3, :4] = 0.7                                                         # a stray tick
+    m = R._mean_dark(D)
+    assert m[2] > 0.2 and m[1] == 0 and m[3] < 0.1 and m[0] < 0.1
+    assert np.isnan(R._mean_dark(D, np.array([0, 0, 0, 0, 1], bool))[4])
+
+
+def test_relative_rule_digits_need_the_stricter_excess_and_one_mark():
+    f, st, md = _faint_row(n=10, k=6, excess=R.REL_SURE_DIGIT + 0.02)
+    state, marked, conf, amb = R._decide(f, st, CAL, strict=True, md=md)
+    assert (state, marked, amb) == ("single", [6], False)
+    f, st, md = _faint_row(n=10, k=6, excess=R.REL_SURE_DIGIT - 0.03)      # faint: read as a mark but flagged -> digit unread
+    assert R._decide(f, st, CAL, strict=True, md=md)[3]
+    md[1] = md[6]                                                          # two faint marks in the column
+    assert R._decide(f, st, CAL, strict=True, md=md)[0] == "multi"
+
+
+def test_relative_measure_is_fused_and_used_by_decide_page():
+    z = np.zeros((2, 5))
+    MA = np.full((2, 5), 0.04)
+    MA[0, 3] = 0.3
+    raw = R.PageRaw([1, 2], [["A", "B", "C", "D", "E"]] * 2, [0], z, z, np.zeros((1, 10)), np.zeros((1, 10)), 0.5, 0.6, MA=MA)
+    a = R.decide_page(raw).answers
+    assert a[0].state == "single" and a[0].marked == [3] and a[1].state == "blank"
+    assert R.decide_page(_raw("auto", 0.2)).answers[0].state == "blank"   # PageRaw without MA: absolute rules only
+
+
+def test_relative_rule_is_off_unless_the_page_looks_like_faint_pencil_throughout():
+    f, st, md = _faint_row(excess=0.25)
+    assert R._decide(f, st, CAL, md=md, trust_rel=False) == R._decide(f, st, CAL)
+    n, nc = 20, 5
+    MA = np.full((n, nc), 0.04)
+    MA[np.arange(n), np.arange(n) % nc] = 0.3                              # every question has one faint mark
+    z = np.zeros((n, nc))
+    mk = lambda MA_: R.PageRaw(list(range(1, n + 1)), [list("ABCDE")] * n, [0], z, z, np.zeros((1, 10)), np.zeros((1, 10)), 0.5, 0.6, MA=MA_)
+    assert R._rel_page_trust(mk(MA), CAL)
+    assert [a.marked for a in R.decide_page(mk(MA)).answers] == [[i % nc] for i in range(n)]
+    few = np.full((n, nc), 0.04)
+    few[:3, 0] = 0.3                                                       # a few ghost-like rows on an otherwise blank page
+    assert not R._rel_page_trust(mk(few), CAL) and all(a.state == "blank" for a in R.decide_page(mk(few)).answers)
+    # a confident dark mark with a ghost beside it is erasure evidence: the page is not trusted
+    F = z.copy()
+    F[:, 0] = 0.95
+    S = z.copy()
+    S[:, 0] = 1.0
+    ghosty = MA.copy()
+    ghosty[:, 0] = 0.8
+    ghosty[:, 1] = 0.3
+    raw = R.PageRaw(list(range(1, n + 1)), [list("ABCDE")] * n, [0], F, S, np.zeros((1, 10)), np.zeros((1, 10)), 0.5, 0.6, MA=ghosty)
+    assert not R._rel_page_trust(raw, CAL)
+
+
+def test_on_a_faint_pencil_page_a_part_dark_bubble_read_by_the_absolute_rules_is_flagged():
+    f, st = np.array([0.0, 0.0, 0.8, 0.0, 0.0]), np.array([0, 0, 1.0, 0, 0.0])
+    md = np.array([0.04, 0.04, 0.0, 0.04, 0.04])                          # dark on part of the disc only (md 0), fill 0.58
+    assert not R._decide(f, st, CAL, md=md, trust_rel=False)[3]
+    assert R._decide(f, st, CAL, md=md, trust_rel=True)[3]
+    md[2] = 0.3                                                            # an evenly dark mark: untouched
+    assert not R._decide(f, st, CAL, md=md, trust_rel=True)[3]

@@ -30,6 +30,13 @@ SERIAL_CLEARANCE = 6.0   # mm between the strip / "No." label and the marker squ
 INFO_TOP = 30.0
 PAD = 3.0
 FRAME_INSET = 0.25  # keeps frame strokes inside the margin
+# ---- timing tracks (header version 2): rows of small black squares along the four edges, outside the frames.  A
+# folded / curled sheet is not flat: the recognizer measures where each tick really is and bends the page back.
+TRACK_PITCH = 6.0                  # mm between tick centres
+TRACK_LEN, TRACK_LR_W, TRACK_TB_H = 3.0, 2.4, 2.4   # tick size along the track, across it (left / right), across it (top / bottom)
+TRACK_EDGE_LR, TRACK_EDGE_TB = 6.0, 4.4             # distance of the ticks from the paper edge (printers clip ~3 mm)
+TRACK_N_LR, TRACK_N_TB = 40, 26                     # ticks per left / right edge, per top / bottom edge
+FRAME_INSET_TRACKS = 1.4           # frames start this far inside the margin when tracks are printed (clear of the left / right ticks)
 ID_WRITEIN_H = 7.0
 ID_ROW_LABEL_W = 5.0
 NAME_BOX_H = 25.0
@@ -55,6 +62,7 @@ class Template:
     title: str = ""
     choice_labels: Optional[List[str]] = None    # one of the header label styles: 1.., A.., a.., 가..
     min_bubble_mm: float = 4.0          # 4.0, 4.25, ... 5.75
+    tracks: bool = True                 # timing tracks along the edges (header version 2); False = the plain version-1 sheet
     used: Optional[int] = None          # questions actually used (1..questions); None = all.  Unused ones are not printed
     subject_digits: int = 2             # marked subject code next to the student ID (0 = none)
     label_id: str = "수험번호"
@@ -139,6 +147,13 @@ class IdGrid:
 
 
 @dataclass
+class Tick:
+    side: str            # "L" | "R" | "T" | "B"
+    index: int           # 0-based, top -> bottom (L, R) or left -> right (T, B)
+    rect: List[float]
+
+
+@dataclass
 class Page:
     index: int
     markers: List[MarkerSpec]
@@ -157,6 +172,7 @@ class Page:
     texts: List[Text]  # title, footer, ...
     subject_grid: Optional[IdGrid] = None
     subject_label: Optional[Text] = None
+    ticks: List[Tick] = field(default_factory=list)   # timing tracks (header version >= 2); empty on older sheets
 
 
 @dataclass
@@ -176,7 +192,8 @@ class Layout:
     def header(self, page: int) -> mk.Header:
         t = self.template
         return mk.Header(t.questions, t.used or t.questions, t.choices, t.id_digits, t.subject_digits, self.total_pages,
-                         page, mk.label_style(t.choice_labels), _bubble_class(t.min_bubble_mm))
+                         page, mk.label_style(t.choice_labels), _bubble_class(t.min_bubble_mm),
+                         self.version or mk.HEADER_VERSION)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -190,6 +207,8 @@ class Layout:
         if L.version == 0:          # legacy layout: no subject code, form identified by its 16-bit id
             L.template.subject_digits = 0
             L.form_key = L.form_key or f"F{L.form_id:04X}"
+        if L.version < 2:           # saved before timing tracks existed (no `tracks` field): such sheets have none
+            L.template.tracks = False
         return L
 
     @classmethod
@@ -244,6 +263,24 @@ def header_cell_rects() -> List[List[List[float]]]:
     return [[_rect(x0 + i * HEADER_CELL_W, y, HEADER_CELL_W, HEADER_ROW_H) for i in range(n)] for y in HEADER_ROW_Y]
 
 
+def track_tick_rects() -> dict:
+    """Side -> [[x, y, w, h], ...] (mm) of the timing ticks (template independent; used when the header says version >= 2)."""
+    out = {}
+    ys = [(PAGE_H - (TRACK_N_LR - 1) * TRACK_PITCH) / 2 + k * TRACK_PITCH for k in range(TRACK_N_LR)]
+    xs = [(PAGE_W - (TRACK_N_TB - 1) * TRACK_PITCH) / 2 + k * TRACK_PITCH for k in range(TRACK_N_TB)]
+    for side, x0 in (("L", TRACK_EDGE_LR), ("R", PAGE_W - TRACK_EDGE_LR - TRACK_LR_W)):
+        out[side] = [_rect(x0, y - TRACK_LEN / 2, TRACK_LR_W, TRACK_LEN) for y in ys]
+    for side, y0 in (("T", TRACK_EDGE_TB), ("B", PAGE_H - TRACK_EDGE_TB - TRACK_TB_H)):
+        out[side] = [_rect(x - TRACK_LEN / 2, y0, TRACK_LEN, TRACK_TB_H) for x in xs]
+    return out
+
+
+def track_tick_centers() -> dict:
+    """Side -> (n, 2) array of tick centres (mm)."""
+    import numpy as np
+    return {s: np.array([[r[0] + r[2] / 2, r[1] + r[3] / 2] for r in rs]) for s, rs in track_tick_rects().items()}
+
+
 def serial_cell_rects() -> List[List[float]]:
     """[x, y, w, h] (mm) of every cell of the serial strip (footer, template independent)."""
     n = mk.SERIAL_CELLS
@@ -273,11 +310,15 @@ def _info_bottom(t: Template) -> float:
     return INFO_TOP + PAD + 5 + ID_WRITEIN_H + 2 + 10 * py + PAD
 
 
+def _frame_left(t: Template) -> float:
+    return MARGIN + (FRAME_INSET_TRACKS if t.tracks else FRAME_INSET)
+
+
 def _answer_area(t: Template) -> List[float]:
     top = _info_bottom(t) + 3.0
     bottom = PAGE_H - MARGIN - MARKER_MM - QUIET_MM
-    left = MARGIN + FRAME_INSET
-    return [left, top, PAGE_W - 2 * MARGIN - 2 * FRAME_INSET, bottom - top]
+    left = _frame_left(t)
+    return [left, top, PAGE_W - 2 * left, bottom - top]
 
 
 def _choose_grid(t: Template, q: int):
@@ -379,7 +420,7 @@ def build_layout(template: Template) -> Layout:
         pages.append(_build_page(t, p, total, first, nq, n_used))
         used_pp.append(n_used)
         first += nq
-    L = Layout(PAGE_W, PAGE_H, MARGIN, None, total, used_pp, 0.25, t, pages, version=mk.HEADER_VERSION)
+    L = Layout(PAGE_W, PAGE_H, MARGIN, None, total, used_pp, 0.25, t, pages, version=2 if t.tracks else 1)
     L.form_key = L.header(0).form_key
     for pg in L.pages:   # the header cells are only known once the layout exists
         rows = mk.encode_header(L.header(pg.index))
@@ -391,7 +432,8 @@ def layout_from_header(h: mk.Header) -> Layout:
     """The layout a self-describing sheet describes (texts are not part of the header: no title)."""
     return build_layout(Template(questions=h.questions, choices=h.choices, id_digits=h.id_digits, pages=h.pages,
                                  choice_labels=h.choice_labels(), used=h.used, subject_digits=h.subject_digits,
-                                 min_bubble_mm=mk.BUBBLE_BASE_MM + mk.BUBBLE_STEP_MM * h.bubble, title=""))
+                                 min_bubble_mm=mk.BUBBLE_BASE_MM + mk.BUBBLE_STEP_MM * h.bubble, title="",
+                                 tracks=h.version >= 2))
 
 
 def header_from_form_key(form_key: str, page: int = 0) -> mk.Header:
@@ -458,7 +500,7 @@ def _build_page(t: Template, p: int, total: int, first_q: int, nq: int, n_used: 
     # ---- student info area: ID grid, subject-code grid, name box
     idia, ipx, ipy = _id_geometry(t)
     info_bottom = _info_bottom(t)
-    left = MARGIN + FRAME_INSET
+    left = _frame_left(t)
     info_box = _rect(left, INFO_TOP, PAGE_W - 2 * left, info_bottom - INFO_TOP)
     label_y = INFO_TOP + PAD + 3.5
     id_label = Text(t.label_id, left + PAD, label_y, 9, "l", 0.0, "id_label")
@@ -506,5 +548,6 @@ def _build_page(t: Template, p: int, total: int, first_q: int, nq: int, n_used: 
                                 for k in range(t.choices)]))
             q += 1
         columns.append(Column(_rect(cx0, abox[1], col_w, ANS_HEADER_H + 2.0 + rows * py), headers, bands, qs))
+    ticks = [Tick(side, i, r) for side, rs in track_tick_rects().items() for i, r in enumerate(rs)] if t.tracks else []
     return Page(p, mspecs, meta_rect, [], info_box, grid, id_label, _rect(*name_box), name_label,
-                _rect(*abox), _r(dia), first_q, n_used, columns, texts, subject_grid, subject_label)
+                _rect(*abox), _r(dia), first_q, n_used, columns, texts, subject_grid, subject_label, ticks)

@@ -158,7 +158,8 @@ def decode_serial(bits) -> Optional[int]:
 # START guard + 32 data cells + STOP guard.  The 64 data bits are a 48-bit payload + CRC-16, XOR-whitened with a
 # fixed pattern (no long white / black runs, whatever the payload).  Guards differ from the legacy meta strip's,
 # so neither decoder accepts the other's strip.
-HEADER_VERSION = 1
+HEADER_VERSIONS = (1, 2)    # 1: plain sheet; 2: also printed with timing tracks (ticks along the four edges, see omr.layout)
+HEADER_VERSION = 2          # what new sheets are printed as
 HEADER_START_GUARD = (True, True, False, True)
 HEADER_STOP_GUARD = (True, False, True, True)
 HEADER_ROWS = 2
@@ -245,7 +246,7 @@ def _bits_bytes(bits) -> bytes:
 
 
 def validate_header(h: Header) -> None:
-    if h.version != HEADER_VERSION:
+    if h.version not in HEADER_VERSIONS:
         raise ValueError(f"unsupported header version {h.version}")
     if not 1 <= h.used <= h.questions:
         raise ValueError("used must be 1..questions")

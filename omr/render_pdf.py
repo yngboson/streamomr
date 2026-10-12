@@ -104,6 +104,10 @@ def render_pdf(layout: Layout, path: str, serials: Optional[Sequence[int]] = Non
         for cell in pg.meta_cells:
             if cell.bit:
                 rect(cell.rect, fill=True)
+        # timing tracks (header version 2)
+        c.setFillGray(0)
+        for tk in pg.ticks:
+            rect(tk.rect, fill=True)
         # serial strip + human-readable number (nothing for serial 0)
         if serial:
             c.setFillGray(0)

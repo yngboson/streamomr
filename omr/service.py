@@ -322,7 +322,7 @@ class OmrService:
             r = c.execute("SELECT * FROM print_runs WHERE id=?", (run_id,)).fetchone()
         if r is None:
             raise KeyError(f"no print run {run_id}")
-        lay = build_layout(Template(**json.loads(r["template_json"])))
+        lay = build_layout(Template(**{"tracks": False, **json.loads(r["template_json"])}))   # runs recorded before tracks existed: no tracks
         serials = list(range(r["start_serial"], r["start_serial"] + r["copies"]))
         path = os.path.join(self.data_dir, "forms", f"{r['form_key']}_run{run_id}_no{serials[0]:04d}-{serials[-1]:04d}.pdf")
         if not os.path.exists(path):

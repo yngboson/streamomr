@@ -24,6 +24,7 @@ from . import illum
 from . import ink as inkmod
 from . import layout as lay
 from . import markers as mk
+from . import tracks as trk
 from .detect import find_markers
 
 DEFAULT_PX_PER_MM = 6.0
@@ -34,9 +35,11 @@ UNKNOWN_FORM, BAD_META, BAD_GEOMETRY = "unknown_form", "bad_meta", "bad_geometry
 
 # ---- tunables (all relative / physical units, none depends on a particular ink colour)
 MIN_MARKERS = 3              # corner markers of one page needed (3 of 4 give 12 points for the homography)
+FOREIGN_MIN_SIDE_FRAC = 0.6   # a marker of another page group this much smaller than a corner marker (measured on this sheet's plane) is junk
 FOREIGN_MARGIN_MM = 5.0      # markers of another page group must lie this far outside the sheet
 MAX_EDGE_RATIO = 3.0         # opposite edges of the projected page may differ at most by this factor (extreme perspective)
 MAX_REPROJ_MM = 2.0          # marker corner reprojection error above this -> bad_geometry (paper bow moves the corners)
+MAX_REPROJ_TRACKS_MM = 8.0   # ... unless the sheet has timing tracks that straighten it (omr.tracks): then this much
 META_MIN_CONTRAST = 0.25     # 1 - black/white of the meta guard cells
 HOT_MEAN_DARKNESS = 0.15     # a bubble whose disc is on average this much darker than paper is "not empty"
 INK_PERCENTILE = 50
@@ -53,10 +56,16 @@ ALIGN_SEARCH_MM = 1.4
 ALIGN_REFINE_STAGES = 2        # extra ring searches around the model's prediction when a marker is hidden
 ALIGN_MIN_COVERAGE = 0.8       # ... and the share of sampled rings that must confirm the model then
 ALIGN_MAX_SHIFT_EXTRAP_MM = 4.0
+RING_SCORE_SIGMA_MM, RING_SCORE_MIN, RING_SCORE_FRAC = 0.5, 0.25, 0.5   # per-row ring check on a straightened page (_rows_misfit)
+TRACKS_MIN_RING_CORR, TRACKS_MIN_INLIERS = 0.4, 0.55   # a page straightened by its timing tracks: rings must confirm it (median correlation / inlier share)
 ALIGN_MAX_SHIFT_MM = 2.0     # a larger correction means something is wrong: fall back to nominal positions
 MIN_STRENGTH = 0.6          # mean ink darkness relative to the page's ink level
 T_LO_FRAC = 0.2             # t_lo = T_LO_FRAC * t_hi
 DIGIT_MARGIN = 0.08         # strict digits (ID, subject) need this much more fill than t_hi when the mark is dark ...
+REL_MARGIN = 0.15           # relative rule: a choice whose disc darkness is this much (absolute, 0..1) above the median of the
+                            # question's other choices counts as marked even when it is too faint for the absolute fill thresholds
+REL_SURE = 0.20             # ... read silently only from this excess on (answers); between REL_MARGIN and this the row is flagged
+REL_SURE_DIGIT = 0.20       # ... strict digit columns (ID, subject): a digit is read from a relative-only mark from this excess on
 DIGIT_MARGIN_FROM, DIGIT_MARGIN_FULL = 0.7, 1.0   # ... scaled in by strength between these (measured: half-filled bubbles of strength < 0.8
                                                   # never reached t_hi, 0.8-1.0 reached t_hi + 0.02, above 1.0 t_hi + 0.07)
 
@@ -119,10 +128,11 @@ class RecognitionResult:
     # alignment-corrected bubble centres in page mm: "answers" [question][choice] -> (x, y), "id" [digit][value] -> (x, y)
     bubble_centers_mm: Dict[str, list] = field(default_factory=dict)
     timing_ms: Dict[str, float] = field(default_factory=dict)
-    warped: Optional[np.ndarray] = None    # canonical gray canvas
+    warped: Optional[np.ndarray] = None    # canonical gray canvas (flattened by the timing tracks when the sheet has them)
     name_crop: Optional[np.ndarray] = None  # gray crop of the name box (from the canonical canvas)
     raw: Optional["PageRaw"] = None        # per-bubble measurements (for multi-frame fusion)
     fused_frames: int = 0                  # > 0: decisions fused over this many frames of one track (omr.fusion)
+    dewarp: Optional[object] = None        # omr.tracks.Field: page mm -> displacement in the homography canvas (None = flat sheet)
 
     @property
     def needs_review(self) -> bool:
@@ -133,7 +143,10 @@ class RecognitionResult:
         """Map layout mm coordinates (page space) to source-image pixels (for overlays)."""
         if self.homography is None:
             raise ValueError("no homography")
-        p = np.asarray(pts_mm, np.float64).reshape(-1, 2) * self.px_per_mm
+        p = np.asarray(pts_mm, np.float64).reshape(-1, 2)
+        if self.dewarp is not None:          # canvas position of a point of the flattened page
+            p = p + self.dewarp(p[:, 0], p[:, 1])
+        p = p * self.px_per_mm
         Hi = np.linalg.inv(np.asarray(self.homography))
         return cv2.perspectiveTransform(p.reshape(-1, 1, 2), Hi).reshape(-1, 2)
 
@@ -151,7 +164,7 @@ class RecognitionResult:
             if hasattr(v, "__dataclass_fields__"):
                 return {k: conv(getattr(v, k)) for k in v.__dataclass_fields__}
             return v
-        d = {k: conv(getattr(self, k)) for k in self.__dataclass_fields__ if k not in ("warped", "name_crop", "raw")}
+        d = {k: conv(getattr(self, k)) for k in self.__dataclass_fields__ if k not in ("warped", "name_crop", "raw", "dewarp")}
         d["needs_review"] = self.needs_review
         return d
 
@@ -573,7 +586,7 @@ def _robust_fit(A, offs, good):
     return coef, keep
 
 
-def _fit_alignment(warped, groups, ppm, extrapolated=False):
+def _fit_alignment(warped, groups, ppm, extrapolated=False, strict=False, diag=None):
     """Smooth (quadratic) correction of the nominal bubble positions, fitted to measured ring positions.
 
     groups: [(centers_mm, diameter_mm)].  Returns (model or None, info).  The page is warped from the visible
@@ -583,7 +596,10 @@ def _fit_alignment(warped, groups, ppm, extrapolated=False):
     be matched to its neighbour: a lattice slip by one pitch would read a neighbouring bubble, undetectably.
     With a hidden marker the page is *extrapolated* beyond the visible markers and the nominal positions can be
     off by more than the window, so the search is repeated around the positions predicted by the model so far
-    (ALIGN_REFINE_STAGES times) and the model must then be backed by rings over (almost) the whole page."""
+    (ALIGN_REFINE_STAGES times) and the model must then be backed by rings over (almost) the whole page.
+    ``diag`` (a dict) receives the half-resolution ink image used here (for the per-row ring check below).
+    ``strict``: the page was straightened with its timing tracks (omr.tracks); the rings must then confirm it - a track
+    field that is wrong somewhere in the interior (a crease close to an edge) leaves rings far from where it put them."""
     ppm_s = ALIGN_PX_PER_MM
     small = cv2.resize(255 - warped, None, fx=ppm_s / ppm, fy=ppm_s / ppm, interpolation=cv2.INTER_AREA)
     sels = [(np.asarray(c, np.float64)[::max(1, len(c) // ALIGN_SAMPLES_PER_GROUP)], dia) for c, dia in groups]
@@ -607,6 +623,8 @@ def _fit_alignment(warped, groups, ppm, extrapolated=False):
         if good.sum() < 12:
             return None, info
         coef, keep = _robust_fit(A, offs, good)
+    if diag is not None:
+        diag["small"], diag["ppm_s"] = small, ppm_s
     res = np.linalg.norm(A[keep] @ coef - offs[keep], axis=1)
     info["align_resid_mm"] = float(np.median(res))
     info["align_used"] = int(keep.sum())
@@ -616,7 +634,45 @@ def _fit_alignment(warped, groups, ppm, extrapolated=False):
         return None, info
     if extrapolated and info["align_inlier_frac"] < ALIGN_MIN_COVERAGE:
         return None, info      # rings not confirmed over the extrapolated part of the page: do not trust it
+    if strict and (info["align_ring_corr"] < TRACKS_MIN_RING_CORR or info["align_inlier_frac"] < TRACKS_MIN_INLIERS):
+        return None, info
     return coef, info
+
+
+def _ring_scores(small, ppm_s, centers_mm, diameter_mm) -> np.ndarray:
+    """Zero-mean normalised correlation of a (slightly tolerant) ring template with the image exactly at each centre, no search."""
+    R = diameter_mm / 2
+    half = int(np.ceil((R + 1.0) * ppm_s))
+    yy, xx = np.mgrid[-half:half + 1, -half:half + 1].astype(np.float32)
+    rr = np.sqrt(xx * xx + yy * yy) / ppm_s
+    t = np.exp(-0.5 * ((rr - R) / RING_SCORE_SIGMA_MM) ** 2).astype(np.float32)
+    t -= t.mean()
+    t /= np.linalg.norm(t)
+    c = np.round(np.asarray(centers_mm, np.float64).reshape(-1, 2) * ppm_s).astype(int)
+    H, W = small.shape
+    pad = np.pad(small.astype(np.float32), half, mode="edge")
+    iy = c[:, 1][:, None, None] + half + np.arange(-half, half + 1)[None, :, None]
+    ix = c[:, 0][:, None, None] + half + np.arange(-half, half + 1)[None, None, :]
+    iy, ix = np.clip(iy, 0, H + 2 * half - 1), np.clip(ix, 0, W + 2 * half - 1)
+    P = pad[iy, ix]
+    P = P - P.mean(axis=(1, 2), keepdims=True)
+    return (P * t).sum(axis=(1, 2)) / np.maximum(np.linalg.norm(P.reshape(len(P), -1), axis=1), 1e-3)
+
+
+def _rows_misfit(diag, groups) -> list:
+    """Per group (centres (n_rows, n_per_row, 2) mm, bubble diameter, rings that must show): which rows have too few printed rings
+    exactly where the model puts them.
+
+    A page straightened by its timing tracks is only exact along the edges; a crease or tight curl close to an edge
+    leaves the interior wrong there, and a few mm off a bubble reads its neighbour (or nothing), silently.  In a row
+    whose bubbles are all in place at least ``need`` of them show their bare ring (the others may carry marks); a row
+    where fewer do is not where it is believed to be: unreliable (ambiguous, to be looked at)."""
+    small, ppm_s = diag["small"], diag["ppm_s"]
+    scores = [_ring_scores(small, ppm_s, c, dia).reshape(c.shape[:2]) for c, dia, _ in groups]
+    ref = float(np.percentile(np.concatenate([s.ravel() for s in scores]), 75))
+    thr = max(RING_SCORE_MIN, RING_SCORE_FRAC * ref)
+    diag["ring_ref"] = ref
+    return [(s >= thr).sum(axis=1) < need for s, (_, _, need) in zip(scores, groups)]
 
 
 def _apply_alignment(centers, coef):
@@ -678,6 +734,35 @@ def _fill(D: np.ndarray, ink: float, unreliable: Optional[np.ndarray] = None):
     return fill, strength
 
 
+REL_COVER_PCT = 35          # a relative mark must be uniform: the 35th percentile of its disc ...
+REL_COVER_FRAC = 0.6        # ... at least this fraction of the 85th.  Measured: faint full marks 0.83+ (10th pct), half-filled bubbles <= 0.3,
+                            # even on the small ID bubbles where blur smears a dark half over the whole disc
+
+
+def _mean_dark(D: np.ndarray, unreliable: Optional[np.ndarray] = None) -> np.ndarray:
+    """Darkness a bubble shows over (nearly) its whole disc, paper-relative 0..1, for the relative rule: the 85th
+    percentile of the disc (`omr.ink.bubble_ink`, the ink floor's measure) when the disc is evenly dark (p35 >=
+    REL_COVER_FRAC x p85), else 0.  So a faint but complete mark counts with its darkness, while a half-filled bubble, a stray
+    or a dot (dark on a part only) never fires the rule - they stay with the absolute rules (flagged).  Independent of
+    the ink floor.  An unknowable bubble is NaN: the rule then leaves its row alone."""
+    p85 = inkmod.bubble_ink(D)
+    m = np.where(np.percentile(D, REL_COVER_PCT, axis=1) >= REL_COVER_FRAC * p85, p85, 0.0).astype(np.float32)
+    if unreliable is not None and unreliable.any():
+        m[unreliable] = np.nan
+    return m
+
+
+def _relative_marks(md: Optional[np.ndarray], strict: bool):
+    """(indices, excess) of the choices whose mean darkness exceeds the median of the question's OTHER choices by
+    REL_MARGIN.  Median of the others: one other mark (multi-mark) or a ghost cannot hide a faint mark, and a shadow or
+    glare that lifts the whole row cancels out.  A row with an unknowable bubble gives nothing."""
+    if md is None or md.size < 3 or np.isnan(md).any():
+        return [], np.zeros(0)
+    ex = np.array([md[i] - np.median(np.delete(md, i)) for i in range(md.size)])
+    idx = np.nonzero(ex >= REL_MARGIN)[0]
+    return [int(i) for i in idx], ex[idx]
+
+
 def _calibrate(F: np.ndarray, ink: float, default_typ: Optional[float] = None, min_strength: float = MIN_STRENGTH) -> _Calib:
     """Page-level thresholds from the fills of all bubbles (F: questions x choices)."""
     top = F.max(axis=1)
@@ -687,7 +772,32 @@ def _calibrate(F: np.ndarray, ink: float, default_typ: Optional[float] = None, m
     return _Calib(ink, typ, t_hi, T_LO_FRAC * t_hi, min_strength)
 
 
-def _decide(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = False):
+def _decide(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = False, md: Optional[np.ndarray] = None,
+            trust_rel: bool = True):
+    """Absolute rules (`_decide_abs`), plus the relative rule (REL_MARGIN) for rows the absolute rules cannot call
+    with confidence: a faint pencil mark under glare is only ~20 % darker than the paper but clearly darker than its
+    neighbours.  The relative rule only ADDS reads to rows that would otherwise be blank / flagged guesses; a row with
+    a confident absolute mark is never changed (erasure ghosts and strays beside a real mark stay out)."""
+    state, marked, conf, amb, confident = _decide_abs(f, strength, c, strict)
+    if md is None or not trust_rel:
+        return state, marked, conf, amb
+    if confident:
+        # faint-pencil page: every real mark is evenly dark (md > 0).  A bubble the absolute rules read as marked but that is
+        # dark on a part of its disc only (md == 0: a half-filled bubble whose fill the low page ink overstates) is flagged.
+        if marked and not amb and any(md[i] == 0.0 for i in marked):
+            return state, marked, conf, True
+        return state, marked, conf, amb
+    rel, ex = _relative_marks(md, strict)
+    if not rel:
+        return state, marked, conf, amb
+    sure = ex.min() >= (REL_SURE_DIGIT if strict else REL_SURE)
+    if not (set(marked) <= set(rel)):        # the absolute guess is a different bubble: leave the row to the flag
+        return state, marked, conf, amb
+    rconf = float(np.clip(0.5 + (ex.min() - REL_MARGIN) / 0.3, 0.0, 0.8))
+    return ("multi" if len(rel) >= 2 else "single"), rel, rconf, not sure
+
+
+def _decide_abs(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = False):
     """One question (or ID column) from its bubbles' fills.  Returns (state, marked, confidence, ambiguous).
 
     in   : fill >= t_hi, at least 70% of the fullest bubble in the question, and inked strongly enough
@@ -707,16 +817,16 @@ def _decide(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = False
                      if strict else 0.0)             # per bubble
     if not (f >= t_in).any():
         if fmax < c.t_lo:
-            return "blank", [], float(min(1.0, 0.5 + 0.5 * (c.t_lo - fmax) / c.t_lo)), False
+            return "blank", [], float(min(1.0, 0.5 + 0.5 * (c.t_lo - fmax) / c.t_lo)), False, False
         guess = [int(np.argmax(f))] if fmax >= 0.5 * (c.t_lo + c.t_hi) else []  # best guess, always flagged
-        return ("single" if guess else "blank"), guess, 0.2, True
+        return ("single" if guess else "blank"), guess, 0.2, True, False
     r = f / fmax
     is_in = (f >= t_in) & (r >= 0.7) & (strength >= c.min_strength)
     is_out = (f < c.t_lo) | (r < rel_out)
     grey = ~is_in & ~is_out
     marked = [int(i) for i in np.nonzero(is_in)[0]]
     if not marked:  # filled but weak (smudge / ghost): best guess, always flagged
-        return "single", [int(np.argmax(f))], 0.2, True
+        return "single", [int(np.argmax(f))], 0.2, True, False
     # confidence: how far the weakest "in" bubble is above the threshold, and how small the strongest
     # competing bubble is relative to the fullest one
     conf_in = float(np.clip(0.5 + (f[is_in] - (t_in[is_in] if strict else c.t_hi)).min() / 0.3, 0.0, 1.0))
@@ -725,7 +835,7 @@ def _decide(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = False
     conf = min(conf_in, conf_out)
     ambiguous = bool(grey.any())
     state = "multi" if len(marked) >= 2 else "single"
-    return state, marked, conf, ambiguous
+    return state, marked, conf, ambiguous, True
 
 
 @dataclass
@@ -745,6 +855,9 @@ class PageRaw:
     SS: Optional[np.ndarray] = None
     ink_source: str = "default"       # how the ink floor was chosen: "auto" (the sheet's own evidence) | "default" (0.45 x black)
     ink_separation: float = 0.0       # marks vs. ghosts, x printed black (omr.ink)
+    MA: Optional[np.ndarray] = None   # disc darkness per bubble (answers / ID / subject): input of the relative rule
+    MI: Optional[np.ndarray] = None
+    MS: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -758,11 +871,12 @@ class PageDecision:
     subject: Optional[str]            # "" when the form has no subject code, None when not readable
 
 
-def _read_digits(F, S_, cal, verified):
+def _read_digits(F, S_, cal, verified, M_=None, trust_rel=True):
     """Digit columns (ID, subject code): strict rules; a digit is read only when unambiguous."""
     digits = []
     for di, (f, st) in enumerate(zip(F, S_)):
-        state, marked, conf, amb = _decide(f, st, cal, strict=True)
+        state, marked, conf, amb = _decide(f, st, cal, strict=True, md=None if M_ is None else M_[di],
+                                          trust_rel=trust_rel)
         val = int(marked[0]) if (state == "single" and not amb and verified) else None
         digits.append(DigitResult(di, state, val, round(conf, 3), amb, [round(float(x), 4) for x in f]))
     if all(d.value is not None for d in digits):
@@ -770,24 +884,51 @@ def _read_digits(F, S_, cal, verified):
     return digits, None, ("blank" if all(d.state == "blank" and not d.ambiguous for d in digits) else "unreadable")
 
 
+REL_TRUST_ROWS = 0.4        # a page is a "faint pencil page" when this share of its questions has a relative-only mark ...
+REL_TRUST_GHOSTS = 0.02     # ... and (almost) no other-choice beside a confident mark is as dark (erasure ghost / stray evidence), per question
+
+
+def _rel_page_trust(raw: PageRaw, cal: _Calib) -> bool:
+    """Does the page itself say that relative-only marks are marks rather than erasure ghosts?  A faint graphite mark and
+    the ghost of an erased one look alike (both ~15-25 % darker than paper, evenly), so the relative rule applies
+    only on a page where (a) a large share of the questions has such a mark and nothing else explains them -
+    the whole sheet is written in faint pencil - and (b) the confidently marked questions show no ghosts beside their
+    marks.  On any other page the relative rule is OFF (measured: on ordinary sheets with erasures it turned ghosts into
+    flagged guesses / silent reads and cost ID read-rate)."""
+    if raw.MA is None or not len(raw.numbers):
+        return False
+    rel_rows = ghosts = 0
+    for f, st, md in zip(raw.FA, raw.SA, raw.MA):
+        state, marked, conf, amb, confident = _decide_abs(f, st, cal)
+        rel, _ = _relative_marks(md, False)
+        if confident:
+            ghosts += len([i for i in rel if i not in marked])
+        elif rel:
+            rel_rows += 1
+    n = len(raw.numbers)
+    return rel_rows >= REL_TRUST_ROWS * n and ghosts <= REL_TRUST_GHOSTS * n
+
+
 def decide_page(raw: PageRaw) -> PageDecision:
     """The one place where bubble measurements become decisions.  Used per frame by `recognize` and on
     track-fused measurements by `omr.fusion`."""
     cal = _calibrate(raw.FA, raw.ink, min_strength=raw.min_strength)
     answers = []
-    for n, lab, f, st in zip(raw.numbers, raw.labels, raw.FA, raw.SA):
-        state, marked, conf, amb = _decide(f, st, cal)
+    trust = _rel_page_trust(raw, cal)
+    MA = raw.MA if raw.MA is not None else [None] * len(raw.numbers)
+    for n, lab, f, st, md in zip(raw.numbers, raw.labels, raw.FA, raw.SA, MA):
+        state, marked, conf, amb = _decide(f, st, cal, md=md, trust_rel=trust)
         answers.append(QuestionResult(n, state, marked, list(lab), round(conf, 3), amb or not raw.verified,
                                       [round(float(x), 4) for x in f]))
     FD = raw.FI if raw.FS is None else np.concatenate([raw.FI, raw.FS])
     ical = _calibrate(FD, raw.ink, default_typ=cal.typ, min_strength=raw.min_strength)
-    digits, student_id, why = _read_digits(raw.FI, raw.SI, ical, raw.verified)
+    digits, student_id, why = _read_digits(raw.FI, raw.SI, ical, raw.verified, raw.MI, trust)
     for d, di in zip(digits, raw.digit_index):
         d.index = di
     flags: List[str] = [] if why is None else ["id_" + why]
     sdigits, subject = [], ""
     if raw.FS is not None and len(raw.FS):
-        sdigits, subject, why = _read_digits(raw.FS, raw.SS, ical, raw.verified)
+        sdigits, subject, why = _read_digits(raw.FS, raw.SS, ical, raw.verified, raw.MS, trust)
         if why is not None:
             flags.append("subject_" + why)
     calib = {"ink": cal.ink, "typ_fill": cal.typ, "t_lo": cal.t_lo, "t_hi": cal.t_hi,
@@ -873,6 +1014,10 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
     d = cv2.perspectiveTransform(np.array([[[lay.PAGE_W / 2 * px_per_mm + px_per_mm, lay.PAGE_H / 2 * px_per_mm]],
                                            [[lay.PAGE_W / 2 * px_per_mm, lay.PAGE_H / 2 * px_per_mm + px_per_mm]]]), Hinv)
     src_ppm = float(np.sqrt(np.linalg.norm(d[0, 0] - c0) * np.linalg.norm(d[1, 0] - c0)))
+    # displacement (mm) of every visible corner marker in the warp: anchors of the timing-track chains (omr.tracks)
+    corner_d = {}
+    for n_, i in enumerate(ids_sorted):
+        corner_d[mk.CORNERS[i % 4]] = ((proj - dst)[4 * n_:4 * n_ + 4].mean(0) / px_per_mm)
     res.homography = Hm.tolist()
     res.page = page
     res.quality = {"reproj_max_mm": float(err_mm.max()), "reproj_rms_mm": float(np.sqrt((err_mm ** 2).mean())),
@@ -880,12 +1025,18 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
                    "sharpness": _quality_sharpness(gray, src), "foreign_markers": len(foreign_ids),
                    "markers_used": len(found), **dinfo}
     lap("homography", t0)
-    if err_mm.max() > MAX_REPROJ_MM or not _plausible_sheet(Hinv, px_per_mm):
+    # a sheet with timing tracks may be bent far more than a plain one (the markers sit where the paper is, not on a plane):
+    # a large marker reprojection error is then only a suspicion, settled below by whether the tracks can bend it flat
+    geom_suspect = MAX_REPROJ_MM < err_mm.max() <= MAX_REPROJ_TRACKS_MM
+    if (err_mm.max() > MAX_REPROJ_MM and not geom_suspect) or not _plausible_sheet(Hinv, px_per_mm):
         res.status = BAD_GEOMETRY
         return done(res)
     # markers of another page group are tolerated only when they lie outside this sheet (another sheet / object)
     for i in foreign_ids:
-        ctr = cv2.perspectiveTransform(np.asarray(res.marker_corners[i], np.float64).mean(0).reshape(1, 1, 2), Hm)[0, 0] / px_per_mm
+        quad = cv2.perspectiveTransform(np.asarray(res.marker_corners[i], np.float64).reshape(-1, 1, 2), Hm).reshape(4, 2) / px_per_mm
+        if np.mean([np.linalg.norm(quad[(k + 1) % 4] - quad[k]) for k in range(4)]) < FOREIGN_MIN_SIDE_FRAC * lay.MARKER_MM:
+            continue                     # far smaller than a corner marker, yet inside the sheet: a pattern in the print, not a marker
+        ctr = quad.mean(0)
         if -FOREIGN_MARGIN_MM <= ctr[0] <= lay.PAGE_W + FOREIGN_MARGIN_MM and -FOREIGN_MARGIN_MM <= ctr[1] <= lay.PAGE_H + FOREIGN_MARGIN_MM:
             res.status = INCONSISTENT
             res.flags.append("mixed_page_markers")
@@ -902,13 +1053,39 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
 
     # ---- 4. header: the sheet describes its own layout (legacy sheets: 16-bit form id, layout from the resolver)
     t0 = time.perf_counter()
+    tfield = None
+    if geom_suspect:       # see above: only a sheet whose tracks bend it flat is accepted
+        tfield = trk.measure(warped, px_per_mm, corner_d)
+        if tfield is None:
+            res.status = BAD_GEOMETRY
+            return done(res)
+        warped = trk.rectify(warped, tfield, px_per_mm)
+        res.warped = warped if keep_images else None
     hdr, info = _read_header(warped, px_per_mm)
+    if geom_suspect and (hdr is None or hdr.version < 2):
+        res.status = BAD_GEOMETRY          # not a bent sheet with tracks: the marker error stands
+        return done(res)
+    meta_pre, meta_src = None, warped
+    if hdr is None:
+        meta_pre = _read_meta(warped, px_per_mm)         # a readable legacy strip: an older sheet, nothing to straighten
+    if hdr is None and meta_pre[0] is None:
+        # header unreadable on the plain warp: a folded / curled sheet with timing tracks reads after they straighten it
+        tfield = trk.measure(warped, px_per_mm, corner_d)
+        if tfield is not None:
+            flat_ = trk.rectify(warped, tfield, px_per_mm)
+            hdr, info2 = _read_header(flat_, px_per_mm)
+            if hdr is not None and hdr.version >= 2:
+                info = info2
+                warped = flat_
+                res.warped = warped if keep_images else None
+            else:
+                hdr, tfield = None, None
     res.quality.update(info)
     if hdr is not None:
         layout = layout_for_header(hdr)
         hpage, total = hdr.page, hdr.pages
     else:
-        meta, linfo = _read_meta(warped, px_per_mm)
+        meta, linfo = meta_pre if (meta_pre is not None and warped is meta_src) else _read_meta(warped, px_per_mm)
         if meta is None:
             lap("meta", t0)
             res.status = BAD_META
@@ -938,6 +1115,25 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
         return done(res)
     pg = layout.pages[page]
 
+    # ---- 4b. timing tracks (header version >= 2): bend the page flat again, so everything below sits at its nominal place
+    t0 = time.perf_counter()
+    if pg.ticks:
+        if tfield is None:          # not yet measured (the header read fine on the plain warp)
+            tfield = trk.measure(warped, px_per_mm, corner_d)
+            if tfield is not None and tfield.max_disp() >= trk.FLAT_MM:
+                warped = trk.rectify(warped, tfield, px_per_mm)
+                res.warped = warped if keep_images else None
+            elif tfield is not None:                    # flat sheet: the tracks confirm the homography, nothing to resample
+                res.quality.update(tfield.info())
+                res.quality["tracks"] = 1.0
+                tfield = trk.FLAT
+        if tfield is not trk.FLAT:
+            res.quality["tracks"] = 1.0 if tfield is not None else 0.0
+            if tfield is not None:
+                res.quality.update(tfield.info())
+                res.dewarp = tfield
+    lap("tracks", t0)
+
     # ---- 5. bubbles
     t0 = time.perf_counter()
     smooth = cv2.GaussianBlur(warped, (0, 0), 0.25 * px_per_mm)
@@ -954,8 +1150,9 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
     icols = list(g.columns) + (list(sg.columns) if sg is not None else [])
     n_id = len(g.columns)
     icent = [(b.cx, b.cy) for col in icols for b in col.bubbles]
+    adiag: dict = {}
     coef, ainfo = _fit_alignment(smooth, [(cent, pg.bubble_diameter), (icent, g.bubble_diameter)], px_per_mm,
-                                 extrapolated=bool(res.missing_corners))
+                                 extrapolated=bool(res.missing_corners) and tfield is None, strict=tfield is not None and tfield is not trk.FLAT, diag=adiag)
     res.quality.update(ainfo)
     cent = _apply_alignment(cent, coef)
     icent = _apply_alignment(icent, coef)
@@ -965,6 +1162,11 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
     DA, UA = illum.bubble_darkness(smooth, cent, pg.bubble_diameter, px_per_mm, "E")
     DI, UI = illum.bubble_darkness(smooth, icent, g.bubble_diameter, px_per_mm, "E")
     UA, UI = ~UA, ~UI                                    # illum returns "reliable"; the fills want "unreliable"
+    if coef is not None and tfield is not None and tfield is not trk.FLAT and adiag:   # a straightened page: interior check
+        bad_q, bad_i = _rows_misfit(adiag, [(cent.reshape(len(qs), nc, 2), pg.bubble_diameter, 2 if nc >= 4 else 1),
+                                           (icent.reshape(len(icols), 10, 2), g.bubble_diameter, 4)])
+        UA, UI = UA | np.repeat(bad_q, nc), UI | np.repeat(bad_i, 10)
+        res.quality["rows_misfit"] = float(bad_q.sum() + bad_i.sum())
     black = float(np.clip(res.quality.get("meta_black", 0.9), META_MIN_CONTRAST, 1.0))   # printed-black darkness on this frame
     # the sheet chooses its own ink floor (never below ABS_INK_FRAC x black); illum before ink: unreliable bubbles are 0 in D
     rows = list(inkmod.bubble_ink(DA).reshape(-1, nc)) + list(inkmod.bubble_ink(DI).reshape(-1, 10))
@@ -976,12 +1178,14 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
     res.quality.update({"ink_abs": abs_ink, "ink_marks_used": n_marks, "unreliable_bubbles": int(UA.sum() + UI.sum())})
     FA, SA = _fill(DA, ink, UA)
     FI, SI = _fill(DI, ink, UI)
+    MA, MI = _mean_dark(DA, UA).reshape(len(qs), nc), _mean_dark(DI, UI).reshape(len(icols), 10)
     FA, SA = FA.reshape(len(qs), nc), SA.reshape(len(qs), nc)
     FI, SI = FI.reshape(len(icols), 10), SI.reshape(len(icols), 10)
     raw = PageRaw([q.number for q in qs], [[b.label for b in q.bubbles] for q in qs], [col.digit_index for col in g.columns],
                   FA, SA, FI[:n_id], SI[:n_id], float(ink), float(min_str), verified=coef is not None,
                   FS=FI[n_id:] if sg is not None else None, SS=SI[n_id:] if sg is not None else None,
-                  ink_source=ia.source, ink_separation=float(ia.separation))
+                  ink_source=ia.source, ink_separation=float(ia.separation),
+                  MA=MA, MI=MI[:n_id], MS=MI[n_id:] if sg is not None else None)
     dec = decide_page(raw)
     res.answers, res.id_digits, res.student_id, idflags, res.calibration = \
         dec.answers, dec.id_digits, dec.student_id, dec.flags, dec.calibration

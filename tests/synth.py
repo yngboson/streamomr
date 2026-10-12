@@ -399,6 +399,7 @@ class Cond:
     raking: float = 0.0                        # 0 = light from the camera side; 1 = grazing light (shading follows the curl)
     glare: Tuple[float, float] = (0.0, 0.0)    # peak specular highlight (fraction of white added), applied with p=0.8
     hard_shadow: float = 0.0                   # depth of a sharp-edged shadow (phone / hand) over part of the sheet
+    fold: Tuple[float, float] = (0.0, 0.0)     # sheet folded once: dihedral deviation from flat (degrees) of the two halves
 
 
 CONDS: Dict[str, Cond] = {
@@ -430,6 +431,14 @@ CONDS: Dict[str, Cond] = {
                    hard_shadow=0.55),
     "raking": Cond("raking", frame=(1080, 1920), tilt=15, rot="upright", printer=True, curl=(6, 16), edge_curl=0.3,
                    raking=1.0, gain=(0.5, 0.9)),
+}
+# folded once (two flat halves at an angle around the crease), alone and with a bowed sheet / hand / grazing light
+FOLD_CONDS: Dict[str, Cond] = {
+    "fold": Cond("fold", frame=(1080, 1920), tilt=15, rot="upright", printer=True, fold=(3, 12)),
+    "fold_curl": Cond("fold_curl", frame=(1080, 1920), tilt=15, rot="upright", printer=True, fold=(3, 12), curl=(3, 10),
+                      edge_curl=0.3, raking=0.3),
+    "fold_hand": Cond("fold_hand", frame=(1080, 1920), tilt=15, rot="upright", printer=True, occlude=1, fold=(3, 12)),
+    "fold_big": Cond("fold_big", frame=(1080, 1920), tilt=15, rot="upright", printer=True, fold=(10, 20), raking=0.3),
 }
 DEFECT_CONDS = ["printer", "handheld", "hand_only"]
 PAPER_CONDS = ["curl", "curl_hand", "glare", "shadow", "raking"]
@@ -589,6 +598,34 @@ def _homography(rng, cond: Cond, W, H, mode: str):
     return M, eff, cam
 
 
+# ================================================================= folded paper
+def _fold_sheet(rng, cond: Cond, gx, gy, X) -> None:
+    """Fold the (already bowed) surface X in place along a random crease: one half stays, the other is rotated about the
+    crease line by a dihedral deviation theta = U(cond.fold) degrees (random sign: valley or mountain).  The sheet is
+    inextensible, so points keep their distance to the crease (their in-plane distance shrinks by cos(theta)).  The crease
+    is mostly the classic half fold (across the length or the width) tilted by up to 20 deg, sometimes anywhere at any
+    angle; its radius is a few mm (the corner is smoothed over ~2 grid steps).  Truth: ``fold`` keys are not recorded."""
+    r = rng.random()
+    if r < 0.4:
+        phi = np.pi / 2 + rng.uniform(-0.35, 0.35)          # crease runs across the width (horizontal fold line)
+    elif r < 0.7:
+        phi = rng.uniform(-0.35, 0.35)                      # crease runs along the length (vertical fold line)
+    else:
+        phi = rng.uniform(0, np.pi)
+    t = np.array([np.cos(phi), np.sin(phi)])                # along the crease
+    n = np.array([-t[1], t[0]])                             # across it
+    span = abs(210 * n[0]) + abs(297 * n[1])
+    off = rng.uniform(-0.22, 0.22) * span
+    s = (gx - 105) * n[0] + (gy - 148.5) * n[1] - off       # signed distance to the crease line
+    th = np.radians(rng.uniform(*cond.fold)) * rng.choice([-1, 1])
+    k = 3.0                                                 # smooth max(s, 0): rounded crease
+    sm = np.where(s > 4 * k, s, 0.5 * (s + np.sqrt(s * s + k * k)))
+    a = sm * (np.cos(th) - 1.0)                             # in-plane shrink of the lifted half
+    X[..., 0] += a * n[0]
+    X[..., 1] += a * n[1]
+    X[..., 2] += sm * np.sin(th)
+
+
 # ================================================================= paper shape and light
 def paper_surface(rng, cond: Cond, step: float = 2.0):
     """3D shape of a (nearly inextensible) bent sheet on a grid of flat page points.
@@ -611,6 +648,8 @@ def paper_surface(rng, cond: Cond, step: float = 2.0):
             X[..., 0] += du * n[0]
             X[..., 1] += du * n[1]
             X[..., 2] += np.sign(sag) * Rc * (1 - np.cos(u / Rc))
+    if cond.fold[1] > 0:                                   # folded once: two flat halves at an angle (see _fold_sheet)
+        _fold_sheet(rng, cond, gx, gy, X)
     if cond.edge_curl > 0 and rng.random() < cond.edge_curl:
         side = int(rng.integers(4))                        # 0 left, 1 right, 2 top, 3 bottom edge
         dist = [gx, 210 - gx, gy, 297 - gy][side]          # distance from that edge
@@ -766,7 +805,7 @@ def make_frame(layout: Layout, pdf_path: str, cond: Cond, rng, page: Optional[in
         fy = (_lowfreq(rng, h_, w_, max(h_ // 3, 8)) - 0.5) * 2 * amp
         gy, gx = np.mgrid[0:h_, 0:w_].astype(np.float32)
         small = cv2.remap(small, gx + fx, gy + fy, cv2.INTER_LINEAR, borderValue=255)
-    if cond.curl[1] > 0 or cond.glare[1] > 0 or cond.hard_shadow > 0 or cond.raking > 0:
+    if cond.curl[1] > 0 or cond.glare[1] > 0 or cond.hard_shadow > 0 or cond.raking > 0 or cond.fold[1] > 0:
         small, cover = paper_in_space(small, PPM_HI * pre, cam, cond, rng, truth)
     else:
         cover = np.full(small.shape, 255, np.uint8)
@@ -937,3 +976,39 @@ def run_one(args):
     return {"name": name, "cond": cond_name, "mode": mode, "status": res.status, "truth": truth,
             "ev": ev, "ms": res.timing_ms["total"], "timing": res.timing_ms, "id": res.student_id, "subject": res.subject,
             "px_per_mm": truth.get("px_per_mm"), "seed": seed}
+
+
+# ================================================================= faint graphite under glare (relative-mark rule)
+# Every filled mark (answers, ID, subject) is graphite only FAINT_DARKNESS darker than the paper; `faint_glare` adds a
+# specular patch over part of the sheet.  Use `make_frame_faint` (it patches draw_ink for the duration of one frame).
+FAINT_DARKNESS = (0.18, 0.32)          # nominal gray drop at full coverage; hatching + blur leave a MEASURED excess (p85 of the disc
+#                                          over the neighbours) of about 0.13-0.24, i.e. the "~20 % darker" of real phone photos
+FAINT_CONDS = {   # full-black print (the ink floor is then ~0.4 of black: faint graphite is below it, as on the user's phone photos)
+    "faint": Cond("faint", frame=(1080, 1920), tilt=15, rot="upright", hard_rate=0.1),
+    "faint_glare": Cond("faint_glare", frame=(1080, 1920), tilt=15, rot="upright", hard_rate=0.1,
+                        curl=(2, 8), glare=(0.12, 0.35)),
+    "faint_prt": Cond("faint_prt", frame=(1080, 1920), tilt=15, rot="upright", printer=True, hard_rate=0.1,
+                      curl=(2, 8), glare=(0.12, 0.35)),
+}
+CONDS.update(FAINT_CONDS)
+
+
+def make_frame_faint(layout: Layout, pdf_path: str, cond: Cond, rng, **kw):
+    """make_frame with every `fill` mark drawn as faint graphite (FAINT_DARKNESS)."""
+    global draw_ink, HARD_KINDS
+    orig, orig_kinds = draw_ink, HARD_KINDS
+    HARD_KINDS = tuple(k for k in HARD_KINDS if not k.startswith("erased"))   # an erased ghost of the same pencil IS a faint mark
+
+    def faint_ink(img, cx_mm, cy_mm, R_mm, rng_, kind, **k):
+        if kind == "fill":
+            k["gray"] = 255.0 * (1.0 - rng_.uniform(*FAINT_DARKNESS))
+        return orig(img, cx_mm, cy_mm, R_mm, rng_, kind, **k)
+
+    draw_ink = faint_ink
+    try:
+        return make_frame(layout, pdf_path, cond, rng, **kw)
+    finally:
+        draw_ink, HARD_KINDS = orig, orig_kinds
+
+
+CONDS.update(FOLD_CONDS)     # registered last: the seeds of the other conditions (enumerate order) stay as they were
