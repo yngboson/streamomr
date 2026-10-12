@@ -2,6 +2,8 @@
 
 실시간(스트리밍) 카메라 OMR. 서버판(FastAPI + 파이썬 OMR)과 브라우저 단독판(Pyodide)이 있다.
 
+**🔗 라이브 데모 (GitHub Pages): https://yngboson.github.io/streamomr/**
+
 ## 에이전트 핸드오프 / 작업 로그
 다음 에이전트는 여기부터 읽을 것. 새 작업은 아래 로그 맨 위에 추가.
 
