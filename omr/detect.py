@@ -160,8 +160,8 @@ def _sample(img: np.ndarray, H: np.ndarray, uv: np.ndarray) -> np.ndarray:
     return cv2.remap(img, p[:, :1], p[:, 1:], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).reshape(-1).astype(np.float64)
 
 
-def model_decode(img: np.ndarray, quad) -> Optional[Tuple[int, np.ndarray]]:
-    """Decode a candidate quad (any cyclic order) -> (id, corners TL,TR,BR,BL) or None (see module docstring)."""
+def _model_fit(img: np.ndarray, quad):
+    """Black/white plane models of a candidate quad -> (quad clockwise, rel cells, rel ring) or None when it has no contrast."""
     q = np.asarray(quad, np.float64).reshape(4, 2)
     a, b = q[1] - q[0], q[2] - q[1]
     if a[0] * b[1] - a[1] * b[0] < 0:                 # make it clockwise (image y points down)
@@ -179,10 +179,25 @@ def model_decode(img: np.ndarray, quad) -> Optional[Tuple[int, np.ndarray]]:
     ring_rel = (ring - _A_WHITE @ bc) / (_A_WHITE @ (wc - bc))
     if (rel[_BORDER] > 0.5).any() or (ring_rel < 0.5).any():
         return None
+    return q, rel, ring_rel
+
+
+def model_decode(img: np.ndarray, quad) -> Optional[Tuple[int, np.ndarray]]:
+    """Decode a candidate quad (any cyclic order) -> (id, corners TL,TR,BR,BL) or None (see module docstring)."""
+    fit = _model_fit(img, quad)
+    if fit is None:
+        return None
+    q, rel, _ = fit
     ok, mid, rot = mk.aruco_dictionary().identify((rel[1:5, 1:5] > 0.5).astype(np.uint8), 0.0)
     if not ok:
         return None
     return int(mid), np.roll(q, int(rot), axis=0)
+
+
+def markerlike(gray: np.ndarray, rejected, min_side: float) -> int:
+    """How many of ArUco's rejected candidates look like a marker (black border, white quiet zone, enough contrast) although
+    their bits are not in the dictionary.  Texture, text and bubbles do not: none of them -> nothing here to search harder for."""
+    return sum(1 for r in rejected if _side(r.reshape(4, 2)) >= min_side and _model_fit(gray, r) is not None)
 
 
 def _redecode(m: "_Merge", gray: np.ndarray, imgs, rejected, min_side: float) -> None:
@@ -214,9 +229,10 @@ def flatten_lighting(gray: np.ndarray) -> np.ndarray:
     small = cv2.resize(gray, (max(w // FLAT_SCALE, 1), max(h // FLAT_SCALE, 1)), interpolation=cv2.INTER_AREA)
     k = max(5, int(min(small.shape[:2]) * FLAT_BG_FRAC) | 1)
     bg = cv2.GaussianBlur(cv2.dilate(small, np.ones((k, k), np.uint8)), (0, 0), k / 3.0)
-    bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
-    flat = np.clip(gray.astype(np.float32) / np.maximum(bg, 8.0) * 235.0, 0, 255)
-    return cv2.GaussianBlur(flat, (0, 0), FLAT_DENOISE_SIGMA).astype(np.uint8)
+    bg = np.maximum(cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR), 8)       # background stays uint8 (the float32 resize/astype cost ~3x);
+    flat = cv2.divide(gray, bg, scale=235.0, dtype=cv2.CV_32F)                       # the quotient stays float: uint8 rounding lost a marker in a frame
+    flat = cv2.GaussianBlur(flat, (0, 0), FLAT_DENOISE_SIGMA)                        # that the float version read (h_all seed 1005)
+    return np.clip(flat, 0, 255, out=flat).astype(np.uint8)
 
 
 def _blob_quads(img: np.ndarray, pred_side: float, pred_c: np.ndarray, max_off: float = COMPLETE_MAX_OFF):
@@ -287,6 +303,35 @@ def _complete(m: "_Merge", gray: np.ndarray) -> int:
     return runs
 
 
+def _off_frame(m: "_Merge", shape) -> bool:
+    """True when the markers found so far (one page, 1-2 of them) predict every missing marker of that page well outside the
+    frame: the sheet is only partly in view, so no further pass (opened ladder, lighting-flattened, windows) can complete it.
+    The prediction is an affine map of the found markers, so a generous margin (the wide window + 15% of the distance) is kept."""
+    groups: Dict[int, List[int]] = {}
+    for i in m.found:
+        groups.setdefault(i // 4, []).append(i)
+    if len(groups) != 1:
+        return False
+    page, ids = next(iter(groups.items()))
+    if not 1 <= len(ids) <= 2:
+        return False
+    mm = {mk.marker_id(page, c): np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], np.float64)
+          for c, (x, y, w, h) in lay.marker_rects(page).items()}
+    src, dst = np.concatenate([mm[i] for i in ids]), np.concatenate([m.found[i] for i in ids])
+    A = np.linalg.lstsq(np.c_[src, np.ones(len(src))], dst, rcond=None)[0].T
+    if not np.isfinite(A).all():
+        return False
+    fh, fw = shape[:2]
+    here = dst.mean(0)
+    for miss in (i for i in range(4 * page, 4 * page + 4) if i not in m.found):
+        pq = mm[miss] @ A[:, :2].T + A[:, 2]
+        ctr, side = pq.mean(0), _side(pq)
+        margin = COMPLETE_WIDE[0] * side + 0.15 * float(np.linalg.norm(ctr - here))
+        if -margin <= ctr[0] <= fw + margin and -margin <= ctr[1] <= fh + margin:
+            return False
+    return True
+
+
 def _search_window(gray, miss, side, ctr, roi_f, max_off):
     """Look for marker ``miss`` in a window of half-size roi_f * side around ctr -> (corners or None, detector runs)."""
     h, w = gray.shape[:2]
@@ -321,22 +366,42 @@ def _search_window(gray, miss, side, ctr, roi_f, max_off):
 def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:
     """-> (id -> 4x2 corners (TL, TR, BR, BL), duplicate/inconsistent id seen, info).
 
-    info: passes (number of detector runs), kernel (px of the pass that completed the set, 0 = plain)."""
+    info: passes (number of detector runs), kernel (px of the pass that completed the set, 0 = plain).
+
+    Cost control (a stream spends most frames without a readable sheet, and those used to cost MORE than a read): the speculative
+    full-frame passes (opened ladder, lighting-flattened) only run on evidence.  Evidence = a marker was decoded, or ArUco rejected a
+    candidate that looks like a marker (`markerlike`).  When the decoded markers predict the rest of their page outside the frame, nothing more is searched;
+    with a marker decoded only its own scale is tried (one opened pass, not the whole ladder)."""
     det = _detector()
     m = _Merge()
     corners, ids, rej = det.detectMarkers(gray)
-    n_rej0 = len(rej)
     m.add(corners, ids)
     passes, used = 1, 0
     min_side = lay.MARKER_MM * MIN_PPM                   # smaller quads cannot be a readable marker of the sheet
+    flat, probed = None, False
+    info = lambda: {"detect_passes": float(passes), "detect_kernel": float(used)}
     if not m.solid():
         _redecode(m, gray, (gray,), rej, min_side)
     if not m.solid():
+        if _off_frame(m, gray.shape):
+            return m.found, m.dup, info()
+        if not (m.found or markerlike(gray, rej, min_side)):
+            # nothing marker-like on the raw frame: one probe on the lighting-flattened copy (a dim / gradient-lit marker has too little
+            # contrast to look like one before flattening); an empty scene stops here after two cheap passes
+            flat = flatten_lighting(gray)
+            c3, i3, rej = det.detectMarkers(flat)
+            m.add(c3, i3)
+            passes += 1
+            if not m.solid():
+                _redecode(m, gray, (gray, flat), rej, min_side)
+            if not m.solid() and not (m.found or markerlike(flat, rej, min_side)):
+                return m.found, m.dup, info()
+            probed = True
         steps = ladder(gray.shape)
-        hint = m.module_px()
+        hint = None if probed else m.module_px()      # (after the flat probe the scale is not trusted yet)
         if hint is not None:
             steps = sorted(steps, key=lambda s: abs(np.log(s / hint)))
-            steps = [hint] + steps[:2]   # the marker seen so far gives the scale; neighbours as a fallback
+            steps = [hint] + steps[:2]                   # the marker seen so far gives the scale; neighbours as a fallback
         else:
             steps = steps[1:] + steps[:1] if len(steps) > 2 else steps     # most likely scales first
         done_k = set()
@@ -354,23 +419,23 @@ def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[st
             if m.solid():
                 used = k
                 break
-    if not m.solid() and (m.found or n_rej0 >= FLAT_MIN_CANDIDATES):   # last resort on a lighting-flattened copy (dim / shadowed / gradient-lit frame);
-        # only when something marker-like is in view: an empty scene must stay cheap (every idle frame of a stream passes here)
-        flat = flatten_lighting(gray)
-        c3, i3, rej = det.detectMarkers(flat)
-        m.add(c3, i3)
-        passes += 1
-        if not m.solid():
-            _redecode(m, gray, (gray, flat), rej, min_side)
-        if m.found and not m.solid():
-            k = _kernel(m.module_px(), KERNEL_OF_MODULE)
-            c4, i4, rej = det.detectMarkers(cv2.morphologyEx(flat, cv2.MORPH_OPEN, np.ones((k, k), np.uint8)))
-            m.add(c4, i4)
-            passes += 1
-        if m.solid():
-            used = -1
+        if not m.solid() and m.found:                   # last resort on a lighting-flattened copy (dim / shadowed / gradient-lit frame)
+            if not probed:
+                flat = flatten_lighting(gray)
+                c3, i3, rej = det.detectMarkers(flat)
+                m.add(c3, i3)
+                passes += 1
+                if not m.solid():
+                    _redecode(m, gray, (gray, flat), rej, min_side)
+            if m.found and not m.solid():
+                k = _kernel(m.module_px(), KERNEL_OF_MODULE)
+                c4, i4, rej = det.detectMarkers(cv2.morphologyEx(flat, cv2.MORPH_OPEN, np.ones((k, k), np.uint8)))
+                m.add(c4, i4)
+                passes += 1
+            if m.solid():
+                used = -1
     passes += _complete(m, gray)
-    return m.found, m.dup, {"detect_passes": float(passes), "detect_kernel": float(used)}
+    return m.found, m.dup, info()
 
 
 # ---------------------------------------------------------------- resolution-aware detection
