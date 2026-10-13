@@ -575,36 +575,48 @@ def layout_for_header(h: mk.Header) -> lay.Layout:
 
 
 # =============================================================================== scoring
+_ring_tmpl_cache: Dict[tuple, np.ndarray] = {}
+
+
 def _ring_offsets(gray_small, ppm_s, centers_mm, diameter_mm, search_mm=1.4):
     """Where is the printed ring really?  Zero-mean normalised correlation of a ring template against
     a small window around each expected bubble centre.  Returns (dx_mm, dy_mm, corr) arrays."""
     R = diameter_mm / 2
     srch = int(round(search_mm * ppm_s))
     half = int(np.ceil((R + 0.7) * ppm_s))
-    yy, xx = np.mgrid[-half:half + 1, -half:half + 1].astype(np.float32)
-    rr = np.sqrt(xx * xx + yy * yy) / ppm_s
-    tmpl = np.exp(-0.5 * ((rr - R) / 0.3) ** 2).astype(np.float32)
-    gray_small = gray_small.astype(np.float32)
+    tmpl = _ring_tmpl_cache.get((R, ppm_s, half))
+    if tmpl is None:
+        yy, xx = np.mgrid[-half:half + 1, -half:half + 1].astype(np.float32)
+        rr = np.sqrt(xx * xx + yy * yy) / ppm_s
+        tmpl = _ring_tmpl_cache[(R, ppm_s, half)] = np.exp(-0.5 * ((rr - R) / 0.3) ** 2).astype(np.float32)
+    gray_small = np.asarray(gray_small, np.float32)
     H, W = gray_small.shape
     n = len(centers_mm)
     out = np.full((n, 3), np.nan)
     pad = half + srch
+    ids, maps = [], []
     for i, (cx, cy) in enumerate(centers_mm):
         x, y = int(round(cx * ppm_s)), int(round(cy * ppm_s))
         if x - pad < 0 or y - pad < 0 or x + pad >= W or y + pad >= H:
             continue
-        roi = gray_small[y - pad:y + pad + 1, x - pad:x + pad + 1]
-        r = cv2.matchTemplate(roi, tmpl, cv2.TM_CCOEFF_NORMED)
-        j = np.unravel_index(int(np.argmax(r)), r.shape)
-        dy = j[0] - srch
-        dx = j[1] - srch
-        if 0 < j[0] < r.shape[0] - 1:   # parabolic sub-pixel refinement
-            a, b, c = r[j[0] - 1, j[1]], r[j[0], j[1]], r[j[0] + 1, j[1]]
-            dy += 0.5 * (a - c) / (a - 2 * b + c + 1e-9)
-        if 0 < j[1] < r.shape[1] - 1:
-            a, b, c = r[j[0], j[1] - 1], r[j[0], j[1]], r[j[0], j[1] + 1]
-            dx += 0.5 * (a - c) / (a - 2 * b + c + 1e-9)
-        out[i] = (dx / ppm_s, dy / ppm_s, r[j])
+        ids.append(i)
+        maps.append(cv2.matchTemplate(gray_small[y - pad:y + pad + 1, x - pad:x + pad + 1], tmpl, cv2.TM_CCOEFF_NORMED))
+    if not ids:
+        return out[:, 0], out[:, 1], out[:, 2]
+    # peak + parabolic sub-pixel refinement of all windows at once (the same arithmetic as per window, in float32)
+    r = np.stack(maps)                                        # (m, h, w)
+    m, h, w = r.shape
+    ar = np.arange(m)
+    j0, j1 = np.divmod(r.reshape(m, -1).argmax(axis=1), w)
+    dy, dx = (j0 - srch).astype(np.float64), (j1 - srch).astype(np.float64)
+    with np.errstate(all="ignore"):
+        ok = (j0 > 0) & (j0 < h - 1)
+        a, b, c = r[ar, np.maximum(j0 - 1, 0), j1], r[ar, j0, j1], r[ar, np.minimum(j0 + 1, h - 1), j1]
+        dy = np.where(ok, dy + 0.5 * (a - c) / (a - 2 * b + c + 1e-9), dy)
+        ok = (j1 > 0) & (j1 < w - 1)
+        a, c = r[ar, j0, np.maximum(j1 - 1, 0)], r[ar, j0, np.minimum(j1 + 1, w - 1)]
+        dx = np.where(ok, dx + 0.5 * (a - c) / (a - 2 * b + c + 1e-9), dx)
+    out[ids] = np.stack([dx / ppm_s, dy / ppm_s, b.astype(np.float64)], axis=1)
     return out[:, 0], out[:, 1], out[:, 2]
 
 
@@ -643,7 +655,7 @@ def _fit_alignment(warped, groups, ppm, extrapolated=False, strict=False, diag=N
     ``strict``: the page was straightened with its timing tracks (omr.tracks); the rings must then confirm it - a track
     field that is wrong somewhere in the interior (a crease close to an edge) leaves rings far from where it put them."""
     ppm_s = ALIGN_PX_PER_MM
-    small = cv2.resize(255 - warped, None, fx=ppm_s / ppm, fy=ppm_s / ppm, interpolation=cv2.INTER_AREA)
+    small = cv2.resize(cv2.bitwise_not(warped), None, fx=ppm_s / ppm, fy=ppm_s / ppm, interpolation=cv2.INTER_AREA)
     sels = [(np.asarray(c, np.float64)[::max(1, len(c) // ALIGN_SAMPLES_PER_GROUP)], dia) for c, dia in groups]
     pts = np.concatenate([c for c, _ in sels])
     A = _poly_terms(pts)
@@ -695,11 +707,10 @@ def _ring_scores(small, ppm_s, centers_mm, diameter_mm) -> np.ndarray:
     t /= np.linalg.norm(t)
     c = np.round(np.asarray(centers_mm, np.float64).reshape(-1, 2) * ppm_s).astype(int)
     H, W = small.shape
-    pad = np.pad(small.astype(np.float32), half, mode="edge")
-    iy = c[:, 1][:, None, None] + half + np.arange(-half, half + 1)[None, :, None]
-    ix = c[:, 0][:, None, None] + half + np.arange(-half, half + 1)[None, None, :]
-    iy, ix = np.clip(iy, 0, H + 2 * half - 1), np.clip(ix, 0, W + 2 * half - 1)
-    P = pad[iy, ix]
+    # a window running over the image border repeats the border pixels (what an edge-padded image gives): clip the indices
+    iy = np.clip(c[:, 1][:, None, None] + np.arange(-half, half + 1)[None, :, None], 0, H - 1)
+    ix = np.clip(c[:, 0][:, None, None] + np.arange(-half, half + 1)[None, None, :], 0, W - 1)
+    P = small[iy, ix].astype(np.float32)
     P = P - P.mean(axis=(1, 2), keepdims=True)
     return (P * t).sum(axis=(1, 2)) / np.maximum(np.linalg.norm(P.reshape(len(P), -1), axis=1), 1e-3)
 
