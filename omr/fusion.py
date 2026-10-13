@@ -165,6 +165,7 @@ class Track:
             out.serial = s
             out.flags = [f for f in out.flags if f != "serial_unreadable"]
         out.fused_frames = len(self.frames)
+        out.trace_src = (self.fused_raw(), list(self.frames))   # not a dataclass field: the fused measurements + the per-frame ones, for the dev log (standalone/glue.py)
         return out
 
     def id_unreadable(self) -> bool:

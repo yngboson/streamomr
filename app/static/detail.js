@@ -219,6 +219,6 @@ const OmrDetail = (() => {
     ev.preventDefault(); ev.stopPropagation();
     openScan(+a.dataset.detail, undefined, a.dataset.q ? +a.dataset.q : undefined);
   }, true);
-  return { open, openScan };
+  return { open, openScan, drawSheet, drawCrop, groupsOf, rowStatus, verdicts };
 })();
 /* OMR-DETAIL-SHARED END */

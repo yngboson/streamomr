@@ -1,3 +1,4 @@
+const DEV = /*__DEV__*/false;   // true only in the dev build (scripts/build_standalone.py --dev): see standalone/dev.js
 const $ = id => document.getElementById(id);
 const video = $('video'), ov = $('ov'), stage = $('stage'), ctx = ov.getContext('2d');
 const grab = document.createElement('canvas');
@@ -273,7 +274,7 @@ const OmrDetail = (() => {
     ev.preventDefault(); ev.stopPropagation();
     openScan(+a.dataset.detail, undefined, a.dataset.q ? +a.dataset.q : undefined);
   }, true);
-  return { open, openScan };
+  return { open, openScan, drawSheet, drawCrop, groupsOf, rowStatus, verdicts };
 })();
 /* OMR-DETAIL-SHARED END */
 
@@ -339,12 +340,13 @@ function startWorker() {
     const m = ev.data;
     if (m.type === 'progress') { $('loadmsg').textContent = m.text; }
     else if (m.type === 'ready') { ready = true; $('loading').hidden = true; $('start').disabled = false; $('hint').textContent = '시작을 누르세요'; }
-    else if (m.type === 'error') { $('loadtitle').textContent = '불러오기 실패'; $('loadmsg').textContent = m.text; $('hint').textContent = '불러오기 실패: ' + m.text; }
+    else if (m.type === 'error') { if (DEV) devLog('ERROR', 'worker: ' + m.text); $('loadtitle').textContent = '불러오기 실패'; $('loadmsg').textContent = m.text; $('hint').textContent = '불러오기 실패: ' + m.text; }
     else if (m.type === 'result') onResult(JSON.parse(m.json), m.ms);
   };
   worker.postMessage({ type: 'init', sources: JSON.parse($('omr-src').textContent), pyodideBase: PYODIDE_BASE });
 }
 function onResult(e, wms) {
+  if (DEV) devOnResult(e);
   rtt = performance.now() - lastSend; busy = false; frames++;
   lastOv = e.overlay; lastState = e.state;
   $('state').textContent = e.state; $('state').className = 'state ' + e.state;
@@ -355,6 +357,7 @@ function onResult(e, wms) {
   if (e.commit) {
     const s = e.commit.summary; s.time = new Date().toISOString();
     beep(); flash(); addScan(s, e.commit.detail);
+    if (DEV) devOnCommit(s, e.commit);
     $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}`;
     if (navigator.vibrate) navigator.vibrate(60);
   }
@@ -383,14 +386,15 @@ function sendFrame() {
   lastSend = performance.now();
   worker.postMessage({ type: 'frame', id: ++frameId, buf: data.buffer, w, h }, [data.buffer]);
 }
-function showErr(e) { $('hint').textContent = '카메라 오류: ' + (e && e.message || e) + (location.protocol === 'http:' && location.hostname !== 'localhost' ? ' (휴대폰은 https 필요)' : ''); }
+function showErr(e) { if (DEV) devLog('ERROR', 'camera: ' + (e && e.message || e)); $('hint').textContent = '카메라 오류: ' + (e && e.message || e) + (location.protocol === 'http:' && location.hostname !== 'localhost' ? ' (휴대폰은 https 필요)' : ''); }
 
 $('start').onclick = async () => {
-  if (running) { running = false; if (stream) stream.getTracks().forEach(t => t.stop()); $('start').textContent = '시작'; return; }
+  if (running) { if (DEV) devLog('SESSION', 'stop'); running = false; if (stream) stream.getTracks().forEach(t => t.stop()); $('start').textContent = '시작'; return; }
   try {
     audio = audio || new (window.AudioContext || window.webkitAudioContext)(); if (audio.state === 'suspended') await audio.resume();
     await openCamera(); running = true; busy = false; $('start').textContent = '중지';
     worker.postMessage({ type: 'reset' });
+    if (DEV) devOnStart();
     stage.classList.toggle('portrait', video.videoHeight > video.videoWidth);
     pump();
   } catch (e) { showErr(e); }

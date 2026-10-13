@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 
 from fastapi.testclient import TestClient
@@ -24,3 +25,15 @@ def test_every_page_is_served_and_references_existing_files(tmp_path):
             assert name in PAGES, name
     assert c.get("/", follow_redirects=False).status_code in (302, 307)
     assert c.get("/static/../app/main.py").status_code in (400, 404)
+
+
+def test_dev_build_only_adds_logging():
+    """--dev embeds standalone/dev.js and the glue's DEV switch; the normal build contains neither."""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import build_standalone
+    normal = build_standalone.build(dev=False)[0]
+    dev = build_standalone.build(dev=True)[0]
+    n, d = open(normal, encoding="utf-8").read(), open(dev, encoding="utf-8").read()
+    assert "const DEV = false;" in n and "devExport" not in n and "DEV = False  # __DEV__" in n
+    assert "const DEV = true;" in d and "devExport" in d and "DEV = True  # __DEV__" in d
+    assert os.path.basename(dev) == "streamomr-dev.html"

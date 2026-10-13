@@ -7,3 +7,4 @@ out/
 realasset/
 node_modules/
 .claude/
+standalone/streamomr-dev.html
