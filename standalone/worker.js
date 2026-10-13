@@ -21,10 +21,11 @@ self.onmessage = async (e) => {
       self.postMessage({ type: 'ready' });
     } catch (err) { self.postMessage({ type: 'error', text: String(err && err.message || err) }); }
   } else if (m.type === 'frame') {
-    const t0 = performance.now();
+    const t0 = performance.now(), rx = performance.timeOrigin + t0;   // rx - m.tx = transfer + queue wait (epoch clocks)
+    const t = () => ({ xfer: rx - m.tx, worker: performance.now() - t0, tx: performance.timeOrigin + performance.now() });
     try {
       const json = pyFrame(new Uint8Array(m.buf), m.w, m.h);
-      self.postMessage({ type: 'result', id: m.id, json, ms: performance.now() - t0 });
-    } catch (err) { self.postMessage({ type: 'result', id: m.id, json: JSON.stringify({ state: 'idle', hint: '', overlay: {}, error: String(err && err.message || err) }), ms: performance.now() - t0 }); }
+      self.postMessage({ type: 'result', id: m.id, json, ms: performance.now() - t0, t: t() });
+    } catch (err) { self.postMessage({ type: 'result', id: m.id, json: JSON.stringify({ state: 'idle', hint: '', overlay: {}, error: String(err && err.message || err) }), ms: performance.now() - t0, t: t() }); }
   } else if (m.type === 'reset' && pyReset) pyReset();
 };

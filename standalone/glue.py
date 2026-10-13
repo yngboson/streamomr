@@ -157,19 +157,28 @@ def detail(result) -> dict:
 class Scanner:
     def __init__(self):
         self.session = StreamSession(resolve_layout=None)
+        self._rgba = self._gray = None
+        self._convert_ms = 0.0
 
     def reset(self):
         self.session.reset()
         self.session.reset_tracking()
 
     def step_rgba(self, buf, w: int, h: int) -> str:
-        """buf: RGBA bytes (memoryview / JsProxy Uint8Array) of a w x h frame.  Returns the event as JSON."""
+        """buf: RGBA bytes (memoryview / JsProxy Uint8Array) of a w x h frame.  Returns the event as JSON.
+        The recognizer only reads the grey image (omr.recognize converts BGR->GRAY first thing), so RGBA goes straight to
+        GRAY (bit-identical to RGBA->BGR->GRAY) into reused buffers: one 8 MB copy in, no BGR image, no per-frame allocation."""
         t0 = time.perf_counter()
-        if hasattr(buf, "to_py"):
-            buf = buf.to_py()
-        rgba = np.frombuffer(buf, np.uint8).reshape(h, w, 4)
-        img = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-        return json.dumps(self.step(img, t0))
+        if self._rgba is None or self._rgba.shape[:2] != (h, w):
+            self._rgba = np.empty((h, w, 4), np.uint8)
+            self._gray = np.empty((h, w), np.uint8)
+        try:
+            buf.assign_to(self._rgba)        # JsProxy (Uint8Array): memcpy straight into the numpy buffer
+        except AttributeError:
+            self._rgba[...] = np.frombuffer(buf, np.uint8).reshape(h, w, 4)
+        cv2.cvtColor(self._rgba, cv2.COLOR_RGBA2GRAY, dst=self._gray)
+        self._convert_ms = (time.perf_counter() - t0) * 1000
+        return json.dumps(self.step(self._gray, t0))
 
     def step(self, img, t0=None) -> dict:
         session = self.session
@@ -179,7 +188,9 @@ class Scanner:
             return {"state": session.state, "hint": f"Camera frame too small ({w}x{h})", "overlay": {},
                     "error": f"frame too small: {w}x{h}", "w": w, "h": h}
         res = recognize(img, None)
+        t_feed = time.perf_counter()
         ev = session.feed(res, time.monotonic(), payload=None)
+        t_feed = (time.perf_counter() - t_feed) * 1000
         ev["status"] = res.status
         ev["w"], ev["h"] = int(img.shape[1]), int(img.shape[0])
         for name in ("commit", "revision"):      # a revision = a better reading of the sheet committed before (omr/revision.py)
@@ -203,6 +214,9 @@ class Scanner:
             ev["missed"] = missed
         ev["ms"] = {"total": round((time.perf_counter() - t0) * 1000, 1),
                     "recognize": round(res.timing_ms.get("total", 0), 1)}
+        if DEV:
+            ev["ms"].update(convert=round(self._convert_ms, 2), feed=round(t_feed, 1))
+        self._convert_ms = 0.0
         return _clean(ev)
 
 
