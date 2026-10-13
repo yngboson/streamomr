@@ -174,8 +174,10 @@ class Scanner:
             self._gray = np.empty((h, w), np.uint8)
         try:
             buf.assign_to(self._rgba)        # JsProxy (Uint8Array): memcpy straight into the numpy buffer
-        except AttributeError:
+        except AttributeError:               # plain bytes / memoryview (native tests)
             self._rgba[...] = np.frombuffer(buf, np.uint8).reshape(h, w, 4)
+        except Exception:                    # any Pyodide-side surprise: fall back to the old copy path
+            self._rgba[...] = np.frombuffer(buf.to_py(), np.uint8).reshape(h, w, 4)
         cv2.cvtColor(self._rgba, cv2.COLOR_RGBA2GRAY, dst=self._gray)
         self._convert_ms = (time.perf_counter() - t0) * 1000
         return json.dumps(self.step(self._gray, t0))
