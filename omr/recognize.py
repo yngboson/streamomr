@@ -25,6 +25,7 @@ from . import ink as inkmod
 from . import layout as lay
 from . import markers as mk
 from . import tracks as trk
+from .fastops import pct_rows
 from .detect import find_markers, find_markers_scaled
 
 DEFAULT_PX_PER_MM = 6.0
@@ -735,17 +736,17 @@ class _Calib:
     min_strength: float = MIN_STRENGTH
 
 
-def _ink_level(groups, floor: float):
+def _ink_level(groups, floor: float, p85s=None):
     """(page ink level or None, number of confident marks).
 
     Only bubbles whose own ink is at least `floor` (a fraction of printed black, measured on the same frame)
     take part, so erasure residue can never define "ink".  The page may therefore only tighten the scale
     above the absolute floor, never loosen it below."""
     vals = []
-    for D in groups:
+    for gi, D in enumerate(groups):
         hot = D.mean(axis=1) > HOT_MEAN_DARKNESS
         if hot.any():
-            p85 = np.percentile(D[hot], 85, axis=1)
+            p85 = p85s[gi][hot] if p85s is not None else np.percentile(D[hot], 85, axis=1)   # p85s: bubble_ink of every bubble, already known
             vals.extend(p85[p85 >= floor])
     if len(vals) < MIN_CALIB_MARKS:
         return None, len(vals)
@@ -807,14 +808,15 @@ REL_COVER_FRAC = 0.6        # ... at least this fraction of the 85th.  Measured:
                             # even on the small ID bubbles where blur smears a dark half over the whole disc
 
 
-def _mean_dark(D: np.ndarray, unreliable: Optional[np.ndarray] = None) -> np.ndarray:
+def _mean_dark(D: np.ndarray, unreliable: Optional[np.ndarray] = None, p85: Optional[np.ndarray] = None) -> np.ndarray:
     """Darkness a bubble shows over (nearly) its whole disc, paper-relative 0..1, for the relative rule: the 85th
     percentile of the disc (`omr.ink.bubble_ink`, the ink floor's measure) when the disc is evenly dark (p35 >=
     REL_COVER_FRAC x p85), else 0.  So a faint but complete mark counts with its darkness, while a half-filled bubble, a stray
     or a dot (dark on a part only) never fires the rule - they stay with the absolute rules (flagged).  Independent of
     the ink floor.  An unknowable bubble is NaN: the rule then leaves its row alone."""
-    p85 = inkmod.bubble_ink(D)
-    m = np.where(np.percentile(D, REL_COVER_PCT, axis=1) >= REL_COVER_FRAC * p85, p85, 0.0).astype(np.float32)
+    if p85 is None:
+        p85 = inkmod.bubble_ink(D)
+    m = np.where(pct_rows(D, REL_COVER_PCT) >= REL_COVER_FRAC * p85, p85, 0.0).astype(np.float32)
     if unreliable is not None and unreliable.any():
         m[unreliable] = np.nan
     return m
@@ -1408,24 +1410,25 @@ def _recognize(gray: np.ndarray, det, resolve_layout, px_per_mm: float, keep_ima
         res.quality["rows_misfit"] = float(bad_q.sum() + bad_i.sum())
     black = float(np.clip(res.quality.get("meta_black", 0.9), META_MIN_CONTRAST, 1.0))   # printed-black darkness on this frame
     # the sheet chooses its own ink floor (never below ABS_INK_FRAC x black); illum before ink: unreliable bubbles are 0 in D
-    rows = list(inkmod.bubble_ink(DA).reshape(-1, nc)) + list(inkmod.bubble_ink(DI).reshape(-1, 10))
+    inkA_, inkI_ = inkmod.bubble_ink(DA), inkmod.bubble_ink(DI)      # the 85th-percentile ink measure of every bubble, once
+    rows = list(inkA_.reshape(-1, nc)) + list(inkI_.reshape(-1, 10))
     ia = inkmod.choose_floor(rows, black)
     abs_ink = ia.floor
-    page_ink, n_marks = _ink_level([DA, DI], abs_ink)
+    page_ink, n_marks = _ink_level([DA, DI], abs_ink, [inkA_, inkI_])
     ink = max(abs_ink, page_ink or 0.0)
     min_str = MIN_STRENGTH if page_ink is not None else STRENGTH_UNCALIBRATED
     res.quality.update({"ink_abs": abs_ink, "ink_marks_used": n_marks, "unreliable_bubbles": int(UA.sum() + UI.sum())})
     # local ink levels: pencil ID block next to dark-pen answers, or a fresh pen half-way through, must each be judged by
     # their own neighbourhood's marks, not by the page-wide level (the pen's) - omr.ink.local_levels
-    hot_ink = lambda D: np.where(D.mean(axis=1) > HOT_MEAN_DARKNESS, inkmod.bubble_ink(D), 0.0)
-    rm_a, rm_i = hot_ink(DA).reshape(len(qs), nc).max(1), hot_ink(DI).reshape(len(icols), 10).max(1)
+    hot_ink = lambda D, p85: np.where(D.mean(axis=1) > HOT_MEAN_DARKNESS, p85, 0.0)
+    rm_a, rm_i = hot_ink(DA, inkA_).reshape(len(qs), nc).max(1), hot_ink(DI, inkI_).reshape(len(icols), 10).max(1)
     lv = inkmod.local_levels(np.concatenate([rm_a, rm_i]), abs_ink, ink,
                              [(range(len(qs)), True), (range(len(qs), len(qs) + len(icols)), False)])
     inkA, inkI = np.repeat(lv[:len(qs)], nc), np.repeat(lv[len(qs):], 10)
     res.quality["ink_local_span"] = float(lv.max() / max(lv.min(), 1e-6))
     FA, SA = _fill(DA, inkA, UA)
     FI, SI = _fill(DI, inkI, UI)
-    MA, MI = _mean_dark(DA, UA).reshape(len(qs), nc), _mean_dark(DI, UI).reshape(len(icols), 10)
+    MA, MI = _mean_dark(DA, UA, inkA_).reshape(len(qs), nc), _mean_dark(DI, UI, inkI_).reshape(len(icols), 10)
     FA, SA = FA.reshape(len(qs), nc), SA.reshape(len(qs), nc)
     FI, SI = FI.reshape(len(icols), 10), SI.reshape(len(icols), 10)
     raw = PageRaw([q.number for q in qs], [[b.label for b in q.bubbles] for q in qs], [col.digit_index for col in g.columns],

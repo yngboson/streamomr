@@ -48,6 +48,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from . import layout as lay
+from .fastops import pct_rows
 
 MARKER_CELLS = 6                 # ArUco 4x4 pattern incl. its black border: 6 x 6 cells
 MARKER_BLACK_PERCENTILE = 75     # of the border pixels' darkness: the darkest quartile (robust to white toner streaks)
@@ -56,7 +57,7 @@ BUBBLE_PERCENTILE = 85           # per-bubble ink measure: as omr.recognize._ink
 
 def bubble_ink(D: np.ndarray) -> np.ndarray:
     """Per-bubble ink measure from an (n_bubbles, n_pixels) darkness array: the 85th percentile of the disc."""
-    return np.percentile(D, BUBBLE_PERCENTILE, axis=1).astype(np.float32)
+    return pct_rows(D, BUBBLE_PERCENTILE).astype(np.float32)
 
 
 def marker_border_samples(warped: np.ndarray, bg: np.ndarray, bgscale: float, ppm: float, page: int,

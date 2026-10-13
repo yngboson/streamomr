@@ -318,6 +318,18 @@ class Field:
              - ((1 - s) * (1 - t) * c["TL"] + s * (1 - t) * c["TR"] + (1 - s) * t * c["BL"] + s * t * c["BR"]))
         return d
 
+    def grid(self, px: np.ndarray, py: np.ndarray) -> np.ndarray:
+        """`self(xs, ys)` on the grid of all (px, py) -> (len(py), len(px), 2), the same numbers, but every edge function is
+        evaluated once per row / column instead of once per grid point."""
+        px, py = np.asarray(px, np.float64), np.asarray(py, np.float64)
+        s = np.clip((px - _XL) / (_XR - _XL), 0, 1)[None, :, None]
+        t = np.clip((py - _YT) / (_YB - _YT), 0, 1)[:, None, None]
+        xc, yc = np.clip(px, _XL, _XR), np.clip(py, _YT, _YB)
+        c = self.c
+        return ((1 - t) * self._edge("T", xc)[None] + t * self._edge("B", xc)[None]
+                + (1 - s) * self._edge("L", yc)[:, None] + s * self._edge("R", yc)[:, None]
+                - ((1 - s) * (1 - t) * c["TL"] + s * (1 - t) * c["TR"] + (1 - s) * t * c["BL"] + s * t * c["BR"]))
+
     # ---- quality
     @property
     def usable(self) -> bool:
@@ -325,8 +337,11 @@ class Field:
         return (ok["L"] and ok["R"]) or (ok["T"] and ok["B"])
 
     def max_disp(self) -> float:
+        if getattr(self, "_max_disp", None) is not None:
+            return self._max_disp
         xs, ys = np.meshgrid(np.linspace(_XL, _XR, 15), np.linspace(_YT, _YB, 20))
-        return float(np.linalg.norm(self(xs, ys), axis=-1).max())
+        self._max_disp = float(np.linalg.norm(self(xs, ys), axis=-1).max())
+        return self._max_disp
 
     def info(self) -> dict:
         t = self.tracks
@@ -357,10 +372,9 @@ def rectify(canvas: np.ndarray, field: Field, ppm: float, border: float = 255) -
     nW, nH = -(-W // ds), -(-H // ds)
     px = ((np.arange(nW) + 0.5) * ds - 0.5) / ppm       # mm of the sample points
     py = ((np.arange(nH) + 0.5) * ds - 0.5) / ppm
-    xs, ys = np.meshgrid(px, py)
-    d = field(xs, ys)
-    mx = ((xs + d[..., 0]) * ppm).astype(np.float32)
-    my = ((ys + d[..., 1]) * ppm).astype(np.float32)
+    d = field.grid(px, py)
+    mx = ((px[None, :] + d[..., 0]) * ppm).astype(np.float32)
+    my = ((py[:, None] + d[..., 1]) * ppm).astype(np.float32)
     mapx = cv2.resize(mx, (nW * ds, nH * ds), interpolation=cv2.INTER_LINEAR)[:H, :W]
     mapy = cv2.resize(my, (nW * ds, nH * ds), interpolation=cv2.INTER_LINEAR)[:H, :W]
     return cv2.remap(canvas, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=border)

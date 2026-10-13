@@ -49,6 +49,8 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 
+from .fastops import pct_rows
+
 INNER_DISC_FRAC = 0.72        # scored disc: same as omr.recognize.INNER_DISC_FRAC
 ANN_IN_MM = 0.25              # annulus starts this far beyond the printed ring's centre line radius
 ANN_OUT_MM = 0.75             # ... and ends here (the neighbour's ring is >= 1.3 mm - ring width away)
@@ -135,7 +137,7 @@ def paper_samples(img: np.ndarray, centers_mm, diameter_mm: float, ppm: float):
     py = np.round(c[:, 1]).astype(int)
     ay, ax, groups = _annulus(diameter_mm / 2, ppm)
     pix = _gather(img, px, py, ay, ax)
-    v = np.stack([np.percentile(pix[:, g], SECT_PCT, axis=1) for g in groups], axis=1)
+    v = np.stack([pct_rows(pix[:, g], SECT_PCT) for g in groups], axis=1)
     # an isolated odd sector (text glyph, streak, a neighbour's smudge): its two neighbours agree and it does not
     prv, nxt = np.roll(v, 1, axis=1), np.roll(v, -1, axis=1)
     m = 0.5 * (prv + nxt)
@@ -278,7 +280,7 @@ def contrast_field(img: np.ndarray, centers_mm, diameter_mm: float, ppm: float, 
     py = np.round(c[:, 1]).astype(int)
     ry, rx = _ring(diameter_mm / 2, ppm)
     pix = _gather(img, px, py, ry, rx)
-    dark = 1.0 - np.percentile(pix, 25, axis=1) / np.maximum(paper, 1.0)     # the dark quartile of the ring line
+    dark = 1.0 - pct_rows(pix, 25) / np.maximum(paper, 1.0)     # the dark quartile of the ring line
     ref = float(np.percentile(dark, C_REF_PCT))
     if ref < 0.03:
         return np.ones(n, np.float32), ref
