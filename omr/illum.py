@@ -124,6 +124,10 @@ def _sector_geometry(R_mm: float, disc_dy: np.ndarray, disc_dx: np.ndarray, ppm:
 
 def _gather(img: np.ndarray, px: np.ndarray, py: np.ndarray, dy: np.ndarray, dx: np.ndarray) -> np.ndarray:
     H, W = img.shape
+    if len(px) and px.min() + dx.min() >= 0 and px.max() + dx.max() < W and py.min() + dy.min() >= 0 and py.max() + dy.max() < H \
+            and img.flags.c_contiguous:
+        # every window lies inside the image: one flat take instead of two clipped fancy indexings
+        return np.take(img, (dy[None, :] + py[:, None]) * W + (dx[None, :] + px[:, None])).astype(np.float32)
     ys = np.clip(dy[None, :] + py[:, None], 0, H - 1)
     xs = np.clip(dx[None, :] + px[:, None], 0, W - 1)
     return img[ys, xs].astype(np.float32)
@@ -230,13 +234,20 @@ def explained_by_neighbours(centers_mm, hot: np.ndarray, v: np.ndarray, ref: np.
     d = cc[hi][None, :, :] - cc[:, None, :]                        # (n, nh, 2)
     dist = np.hypot(d[..., 0], d[..., 1])
     near = (dist > 1e-6) & (dist < NEIGHBOUR_MM)
-    ang = np.mod(np.arctan2(d[..., 1], d[..., 0]), 2 * np.pi)
+    r, c = np.nonzero(near)                                        # only the (bubble, inked neighbour) pairs that are close are worked out
+    if r.size == 0:
+        return out
+    dr = d[r, c]
+    dist = dist[r, c]
+    ang = np.mod(np.arctan2(dr[:, 1], dr[:, 0]), 2 * np.pi)
     half = np.arcsin(np.clip(3.6 / np.maximum(dist, 3.7), 0, 1))     # angular half-width of a (overflowing) mark
     centre = (np.arange(N_SECT) + 0.5) * 2 * np.pi / N_SECT
-    dang = np.abs((ang[..., None] - centre[None, None, :] + np.pi) % (2 * np.pi) - np.pi)    # (n, nh, K)
-    hit = near[..., None] & (dang <= (half[..., None] + np.pi / N_SECT))
-    out = hit.any(1) & (v < 0.93 * ref[:, None])
-    return out
+    dang = np.abs((ang[:, None] - centre[None, :] + np.pi) % (2 * np.pi) - np.pi)    # (pairs, K)
+    hit = (dang <= (half[:, None] + np.pi / N_SECT)).astype(np.uint8)
+    starts = np.flatnonzero(np.r_[True, r[1:] != r[:-1]])             # r is sorted: reduce the pairs of each bubble
+    anyhit = np.zeros((n, N_SECT), bool)
+    anyhit[r[starts]] = np.bitwise_or.reduceat(hit, starts, axis=0) != 0
+    return anyhit & (v < 0.93 * ref[:, None])
 
 
 def halo_lift(centers_mm, hot: np.ndarray, level: np.ndarray) -> np.ndarray:
