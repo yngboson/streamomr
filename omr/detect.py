@@ -92,7 +92,8 @@ def _kernel(module_px: float, frac: float) -> int:
 
 
 def _side(c: np.ndarray) -> float:
-    return float(np.mean([np.linalg.norm(c[(i + 1) % 4] - c[i]) for i in range(4)]))
+    d = np.roll(c, -1, axis=0) - c
+    return float(np.sqrt((d * d).sum(axis=1)).mean())
 
 
 class _Merge:

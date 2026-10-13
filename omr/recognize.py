@@ -1062,7 +1062,8 @@ def _pre_rows(F, S_, M_, cal, strict):
     """Absolute decision + relative marks of every row, computed once (shared by the trust evidence and the decisions)."""
     rel = _rel_rows(M_, strict)
     if rel is None:
-        rel = [([], np.zeros(0))] * len(F)
+        rel = []
+    rel = list(rel) + [([], np.zeros(0))] * (len(F) - len(rel))       # rows without a darkness measure have no relative marks
     return [(_decide_abs(f, st, cal, strict), r) for f, st, r in zip(F, S_, rel)]
 
 
@@ -1098,6 +1099,10 @@ def _rel_trust_digits(F, S_, M_, cal, pre=None) -> bool:
     rel_only, strong, ghosts = _rel_evidence(F, S_, M_, cal, True, pre)
     n = len(F)
     return bool(strong.sum() >= max(REL_TRUST_MIN_DIGITS, REL_TRUST_ROWS * n) and ghosts.sum() <= REL_TRUST_GHOSTS * n)
+
+
+def decision_sig(answers, student_id, subject) -> tuple:
+    return (tuple((a.number, a.state, tuple(a.marked), a.guess) for a in answers), student_id, subject)
 
 
 def decide_page(raw: PageRaw) -> PageDecision:
@@ -1454,6 +1459,7 @@ def _recognize(gray: np.ndarray, det, resolve_layout, px_per_mm: float, keep_ima
     order = sorted(range(len(res.answers)), key=lambda i: res.answers[i].number)
     res.answers = [res.answers[i] for i in order]
     res.raw = raw
+    raw.decided_sig = decision_sig(dec.answers, res.student_id, res.subject)   # what `omr.fusion.trustworthy` compares against
     if coef is None:  # bubble positions could not be verified against the printed rings: trust nothing
         res.flags.append("alignment_unverified")
     res.flags.extend(idflags)

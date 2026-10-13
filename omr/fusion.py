@@ -25,7 +25,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from .recognize import UNRELIABLE_FILL, UNRELIABLE_STRENGTH, PageRaw, decide_page, unreliable_mask
+from .recognize import UNRELIABLE_FILL, UNRELIABLE_STRENGTH, PageRaw, decide_page, decision_sig, unreliable_mask
 
 WINDOW = 12              # most recent frames fused (the median adapts, memory is bounded)
 CONTRADICT_FILL = 0.6    # per-bubble fill swing that counts as a contradiction ...
@@ -49,7 +49,7 @@ def sheet_quad(r):
 
 
 def _sig(answers, student_id, subject):
-    return (tuple((a.number, a.state, tuple(a.marked), a.guess) for a in answers), student_id, subject)
+    return decision_sig(answers, student_id, subject)
 
 
 def trustworthy(r) -> bool:
@@ -58,8 +58,12 @@ def trustworthy(r) -> bool:
     raw = r.raw
     if raw is None or not raw.verified:
         return False
-    d = decide_page(raw)
-    return _sig(d.answers, d.student_id, d.subject) == _sig(r.answers, r.student_id, r.subject)
+    # the decision signature recognize() took when it decided this very raw (decide_page is deterministic): not decided again per frame
+    sig = getattr(raw, "decided_sig", None)
+    if sig is None:
+        d = decide_page(raw)
+        sig = _sig(d.answers, d.student_id, d.subject)
+    return sig == _sig(r.answers, r.student_id, r.subject)
 
 
 class Track:
