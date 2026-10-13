@@ -8,3 +8,4 @@ realasset/
 node_modules/
 .claude/
 standalone/streamomr-dev.html
+docs/*.zip
