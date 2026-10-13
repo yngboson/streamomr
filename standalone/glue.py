@@ -16,6 +16,7 @@ import numpy as np
 from omr import recognize as R
 from omr.recognize import recognize
 from omr.stream import StreamSession
+from omr.identity import severity
 
 MIN_FRAME_SIDE = 64      # same as app/main.py
 DEV = False  # __DEV__: scripts/build_standalone.py --dev sets this True (extra per-frame diagnostics for standalone/dev.js)
@@ -124,7 +125,7 @@ def summarize(result) -> dict:
             "n_multi": sum(1 for a in result.answers if a.state == "multi"),
             "n_doubtful": sum(1 for a in result.answers if a.ambiguous),
             "flags": list(result.flags), "needs_review": result.needs_review,
-            "sharpness": (result.quality or {}).get("sharpness"),
+            "sharpness": (result.quality or {}).get("sharpness"), "severity": severity(result),
             "answers": [{"q": a.number, "state": a.state, "marked": "|".join(a.labels[i] for i in a.marked),
                          "doubt": bool(a.ambiguous)} for a in result.answers]}
 

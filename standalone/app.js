@@ -10,30 +10,84 @@ let busy = false, lastOv = null, lastState = 'idle', lastSend = 0, torchOn = fal
 let sentDims = '-', frames = 0, fpsT = performance.now(), fps = 0, rtt = 0;
 const scans = [];   // in-memory results of this page load
 
-function beep() {
-  if (!audio) return;
-  const o = audio.createOscillator(), g = audio.createGain();
-  o.frequency.value = 1040; o.connect(g); g.connect(audio.destination);
-  g.gain.setValueAtTime(0.2, audio.currentTime); g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.18);
-  o.start(); o.stop(audio.currentTime + 0.2);
+// ---- commit feedback: ok = short high beep + green; minor (answer rows to check) = two mid tones + amber;
+// severe (student ID / subject code not reliably read) = three low buzzes + red, so the person can rescan at once
+const FB_MS = { ok: 350, minor: 2500, severe: 4000 };
+let fbTimer = null;
+function tone(freq, at, dur, type, vol) {
+  const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime + at;
+  o.type = type; o.frequency.value = freq; o.connect(g); g.connect(audio.destination);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.start(t); o.stop(t + dur + 0.02);
 }
-function flash() { stage.classList.add('flash'); setTimeout(() => stage.classList.remove('flash'), 350); }
+function feedback(sev) {
+  sev = FB_MS[sev] ? sev : 'ok';
+  if (audio) {
+    if (sev === 'ok') tone(1040, 0, 0.18, 'sine', 0.2);
+    else if (sev === 'minor') { tone(740, 0, 0.13, 'triangle', 0.28); tone(587, 0.16, 0.16, 'triangle', 0.28); }
+    else for (let k = 0; k < 3; k++) tone(294, k * 0.22, 0.16, 'square', 0.12);
+  }
+  stage.classList.remove('fb-ok', 'fb-minor', 'fb-severe'); void stage.offsetWidth; stage.classList.add('fb-' + sev);
+  clearTimeout(fbTimer); fbTimer = setTimeout(() => stage.classList.remove('fb-' + sev), FB_MS[sev]);
+  if (navigator.vibrate) navigator.vibrate(sev === 'ok' ? 60 : sev === 'minor' ? [80, 60, 80] : [200, 80, 200, 80, 200]);
+}
+const SEV_TEXT = { minor: '확인할 문항 있음', severe: '학번/과목 인식 실패' };
+function fixButton(sev, open) {   // banner button after a non-ok commit: opens the detail with 정정 buttons
+  if (sev === 'ok') return;
+  const b = document.createElement('button'); b.type = 'button'; b.className = 'fixbtn ' + sev;
+  b.textContent = SEV_TEXT[sev] + ' · 정정'; b.onclick = open; $('res').appendChild(b);
+}
 const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function subjLabel(subject) { return subject === null || subject === undefined ? '과목? 미확인' : subject === '' ? '' : '과목 ' + subject; }
 
 // ---- results list
 function addScan(s, detail) {
   scans.push(s);
+  s.li = document.createElement('li');
+  renderScan(s, detail);
+  $('recent').prepend(s.li);
+  $('count').textContent = scans.length + '건'; $('csv').disabled = false;
+}
+function renderScan(s, detail) {
   const ans = s.answers.map(a => a.marked || '-').join(' ');
-  const li = document.createElement('li');
+  const li = s.li, sev = s.severity || 'ok';
   li.style.flexDirection = 'column';
+  li.style.borderLeft = sev === 'ok' ? '' : `4px solid var(--${sev === 'severe' ? 'bad' : 'warn'})`;
+  const fixed = s.fixed && s.fixed.length ? ` <span class="tag">정정 ${esc(s.fixed.join(','))}</span>` : '';
   const flags = s.flags.length ? ` <span class="tag warn">${esc(s.flags.join(','))}</span>` : '';
   li.innerHTML = `<span><b>${esc(subjLabel(s.subject))}</b> ${s.subject === '' ? '' : '&middot;'} <b>${esc(s.student_id ?? '(번호 없음)')}</b> &middot; ${s.page + 1}${s.total_pages ? '/' + s.total_pages : ''}페이지` +
     (s.needs_review ? ' <span class="badge needs_review">확인 필요</span>' : '') + flags + `</span>` +
     `<span class="mut small" style="word-break:break-all">${esc(ans)}</span>`;
+  if (fixed) li.firstChild.insertAdjacentHTML('beforeend', fixed);
   if (detail && detail.img) { li.onclick = () => showDetail(s, detail); li.title = '탭하면 인식 상세'; li.innerHTML += '<span class="mut small">탭하여 인식 상세 보기 &rsaquo;</span>'; }
-  $('recent').prepend(li);
-  $('count').textContent = scans.length + '건'; $('csv').disabled = false;
+}
+// a person's correction from the detail view: update this result in memory (list, CSV) right away
+const ID_FLAGS = { id: ['id_unreadable', 'id_guessed', 'id_blank'], subject: ['subject_unreadable', 'subject_guessed', 'subject_blank'] };
+function applyFix(s, d, fix) {
+  s.fixed = s.fixed || [];
+  if (fix.kind === 'q') {
+    const a = s.answers.find(x => x.q === fix.q), row = d.answers.find(x => x.q === fix.q);
+    if (!a || !row) return { error: '문항을 찾지 못했습니다' };
+    Object.assign(a, { state: fix.choice === null ? 'blank' : 'single', marked: fix.choice === null ? '' : String(row.labels[fix.choice]), doubt: false });
+    if (!s.fixed.includes(String(fix.q))) s.fixed.push(String(fix.q));
+  } else {
+    const rows = d[fix.kind], vals = rows.map((r, i) => i === fix.index ? fix.choice : (r.state === 'blank' ? null : r.value));
+    const label = fix.kind === 'id' ? '학번' : '과목';
+    if (!s.fixed.includes(label)) s.fixed.push(label);
+    if (vals.every(v => v !== null && v !== undefined)) {
+      s[fix.kind === 'id' ? 'student_id' : 'subject'] = vals.join('');
+      s.flags = s.flags.filter(f => !ID_FLAGS[fix.kind].includes(f));
+    }
+  }
+  s.n_doubtful = s.answers.filter(a => a.doubt).length;
+  s.n_multi = s.answers.filter(a => a.state === 'multi').length;
+  s.n_blank = s.answers.filter(a => a.state === 'blank').length;
+  const idBad = s.flags.some(f => ID_FLAGS.id.includes(f) || ID_FLAGS.subject.includes(f)) || (d.id && d.id.length && !s.student_id);
+  s.severity = idBad ? 'severe' : (s.n_doubtful || s.n_multi) ? 'minor' : 'ok';
+  s.needs_review = s.severity !== 'ok';
+  renderScan(s, d);
+  if (scans[scans.length - 1] === s) $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}` + (s.severity === 'ok' ? ' · 정정 완료' : '');
+  return {};
 }
 const csvCell = v => { const s = v === null || v === undefined ? '' : String(v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 $('csv').onclick = () => {
@@ -42,7 +96,7 @@ $('csv').onclick = () => {
   for (let q = 1; q <= nq; q++) head.push('q' + q);
   const rows = [head].concat(scans.map(s => {
     const byQ = {}; s.answers.forEach(a => { byQ[a.q] = a.marked; });
-    const r = [s.time, s.subject, s.student_id, s.page + 1, s.total_pages, s.serial, s.form_key, s.n_questions, s.n_blank, s.n_multi, s.n_doubtful, s.needs_review, s.flags.join(';')];
+    const r = [s.time, s.subject, s.student_id, s.page + 1, s.total_pages, s.serial, s.form_key, s.n_questions, s.n_blank, s.n_multi, s.n_doubtful, s.needs_review, s.flags.concat(s.fixed && s.fixed.length ? ['fixed:' + s.fixed.join(',')] : []).join(';')];
     for (let q = 1; q <= nq; q++) r.push(byQ[q] ?? '');
     return r;
   }));
@@ -58,10 +112,12 @@ $('reset').onclick = () => { if (worker) worker.postMessage({ type: 'reset' }); 
  * per bubble (green read / red multi / orange doubtful-or-blank), boxes around problem rows, a problem list with
  * per-choice darkness, and - on tap of a problem row or one of its choices - a zoomed crop of that row from the
  * full-resolution sheet (cropped client-side from the same image, so it is as crisp as the stored sheet).
+ * With o.onFix(fix) given, every problem row also gets 정정 buttons: the person picks the right choice / digit and
+ * onFix({kind:'q'|'id'|'subject', index, q, choice}) (choice null = blank) applies it; the row turns green (수정됨).
  * d = {ppm, page_w?, t_lo, t_hi, id_t_lo, id_t_hi, answers:[{q,state,marked,labels,scores,doubt,guessed?,centers}],
  *      id:[{state,value,doubt,guessed?,scores,centers}], subject:[...]}  (centers: mm on the sheet, per choice)  */
 const OmrDetail = (() => {
-  const COL = { on: '#2ecc71', bad: '#ff5252', doubt: '#f5a524', off: 'rgba(120,120,120,.7)' };
+  const COL = { on: '#2ecc71', bad: '#ff5252', doubt: '#f5a524', off: 'rgba(120,120,120,.7)', fixed: '#2ecc71' };
   const CSS = `
 .od-modal { position:fixed; inset:0; background:rgba(0,0,0,.8); z-index:50; overflow:auto; padding:10px; -webkit-overflow-scrolling:touch; }
 .od-modal[hidden] { display:none; }
@@ -71,6 +127,12 @@ const OmrDetail = (() => {
 .od-sheet { width:100%; display:block; border-radius:4px; background:#fff; margin:6px 0; cursor:pointer; }
 .od-row { border:1px solid #2a313b; border-radius:8px; padding:8px; margin:8px 0; }
 .od-row.bad { border-color:var(--bad,#ff5252); } .od-row.doubt { border-color:var(--warn,#f5a524); }
+.od-row.fixed { border-color:#2ecc71; }
+.od-fix { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:8px; padding-top:8px; border-top:1px dashed #2a313b; }
+.od-fix b { font-size:13px; margin-right:2px; }
+.od-fix button { min-width:44px; min-height:40px; font:inherit; font-size:15px; font-weight:700; border-radius:8px; border:1px solid #3a4250; background:#11151a; color:inherit; cursor:pointer; }
+.od-fix button.cur { background:#2ecc71; color:#000; }
+.od-fix button:disabled { opacity:.5; }
 .od-row.flash { outline:2px solid #4dabf7; }
 .od-top { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; cursor:pointer; min-height:32px; }
 .od-tag { font-size:12px; padding:0 7px; border-radius:5px; background:#4dabf7; color:#000; font-weight:700; }
@@ -91,6 +153,7 @@ const OmrDetail = (() => {
   // per-choice verdict: on = counted as marked, bad = counted wrongly (multi), doubt = grey zone / doubtful, off = empty
   function verdicts(r, lo, hi, kind) {
     const marked = kind === 'q' ? r.marked : (r.state === 'blank' ? [] : r.scores.map((v, i) => i).filter(i => r.scores[i] === Math.max(...r.scores) && r.scores[i] >= lo));
+    if (r.fixed) return r.scores.map((v, i) => (kind === 'q' ? r.marked.includes(i) : r.value === i) ? 'on' : 'off');
     return r.scores.map((v, i) => {
       const isMarked = marked.includes(i);
       if (r.state === 'multi' && isMarked) return 'bad';
@@ -99,6 +162,7 @@ const OmrDetail = (() => {
     });
   }
   function rowStatus(r) {
+    if (r.fixed) return ['fixed', '수정됨'];
     if (r.state === 'multi') return ['bad', '복수 마킹'];
     if (r.state === 'blank' && r.doubt) return ['doubt', '애매 (옅은 마킹?)'];
     if (r.state === 'blank') return ['doubt', '공란'];
@@ -118,6 +182,12 @@ const OmrDetail = (() => {
   function chipsFor(r, vs, kind) {
     return '<div class="od-chips">' + r.scores.map((v, i) =>
       `<button type="button" class="od-chip ${vs[i] === 'off' ? '' : vs[i]}" data-c="${i}">${esc(choiceName(r, kind, i))} &middot; ${Math.round(v * 100)}%</button>`).join('') + '</div>';
+  }
+  // 정정 buttons: every choice (answers) or digit 0-9 (ID / subject), plus 공란
+  function fixBar(r, kind) {
+    const cur = kind === 'q' ? (r.state === 'single' ? r.marked[0] : null) : (r.state !== 'blank' ? r.value : null);
+    const opts = r.scores.map((v, i) => `<button type="button" data-v="${i}" class="${r.fixed && cur === i ? 'cur' : ''}">${esc(choiceName(r, kind, i))}</button>`).join('');
+    return `<div class="od-fix"><b>${r.fixed ? '다시 정정' : '정정'}</b>${opts}<button type="button" data-v="" class="${r.fixed && cur === null ? 'cur' : ''}">공란</button></div>`;
   }
   function groupsOf(d) {
     const lo = d.t_lo ?? 0.2, hi = d.t_hi ?? 0.5, idLo = d.id_t_lo ?? lo, idHi = d.id_t_hi ?? hi;
@@ -206,7 +276,7 @@ const OmrDetail = (() => {
       const vs = verdicts(r, g.lo, g.hi, g.kind), box = document.createElement('div');
       box.className = 'od-row ' + cls;
       box.innerHTML = `<div class="od-top"><b>${esc(g.name(r, i))}</b> <span class="${cls === 'bad' ? 'od-err' : 'od-mut'}">${txt}</span> ${guessText(r, g.kind)}<span class="od-mut">▾ 확대</span></div>` +
-        chipsFor(r, vs, g.kind) + '<div class="od-zoom" hidden></div>';
+        chipsFor(r, vs, g.kind) + '<div class="od-zoom" hidden></div>' + (o.onFix ? fixBar(r, g.kind) : '');
       const zoom = box.querySelector('.od-zoom'); let rings = true, sel = null;
       const show = (s, toggle) => {
         if (toggle && !zoom.hidden && sel === s) { zoom.hidden = true; box.querySelectorAll('.od-chip').forEach(b => b.classList.remove('sel')); return; }
@@ -219,7 +289,20 @@ const OmrDetail = (() => {
       };
       box.querySelector('.od-top').onclick = () => show(null, true);
       box.querySelectorAll('.od-chip').forEach(b => { b.onclick = () => show(+b.dataset.c, true); });
-      list.appendChild(box); items.push({ box, zoom, g, r, show });
+      box.querySelectorAll('.od-fix button').forEach(b => { b.onclick = async () => {
+        const choice = b.dataset.v === '' ? null : +b.dataset.v;
+        box.querySelectorAll('.od-fix button').forEach(x => { x.disabled = true; });
+        let err = null;
+        try { const res = await o.onFix({ kind: g.kind, index: i, q: r.q, choice }); if (res && res.error) err = res.error; }
+        catch (e) { err = e.message || String(e); }
+        if (err) { box.querySelectorAll('.od-fix button').forEach(x => { x.disabled = false; });
+          box.querySelector('.od-fix').insertAdjacentHTML('beforeend', `<span class="od-err">${esc(err)}</span>`); return; }
+        if (g.kind === 'q') Object.assign(r, { state: choice === null ? 'blank' : 'single', marked: choice === null ? [] : [choice] });
+        else Object.assign(r, { state: choice === null ? 'blank' : 'single', value: choice });
+        Object.assign(r, { doubt: false, guessed: false, fixed: true });
+        render(Object.assign(o, { focus: [g.kind, i] }), img);
+      }; });
+      list.appendChild(box); items.push({ box, zoom, g, r, show, i });
     }));
     list.insertAdjacentHTML('afterbegin', `<b>${items.length ? '확인할 항목 ' + items.length + '개' : '문제 있는 항목 없음'}</b>`);
     body.appendChild(list);
@@ -240,6 +323,9 @@ const OmrDetail = (() => {
       best[0].box.classList.add('flash'); setTimeout(() => best[0].box.classList.remove('flash'), 900);
     };
     m.hidden = false; m.scrollTop = 0; document.body.style.overflow = 'hidden';
+    const ff = o.focus ? items.find(it => it.g.kind === o.focus[0] && it.i === o.focus[1]) : null;
+    o.focus = null;
+    if (ff) { ff.box.scrollIntoView({ block: 'center' }); ff.box.classList.add('flash'); setTimeout(() => ff.box.classList.remove('flash'), 900); return; }
     const f = o.focusQ ? items.find(it => it.g.kind === 'q' && it.r.q === o.focusQ) : null;
     if (f) { f.show(null, false); f.box.scrollIntoView({ block: 'center' }); }
   }
@@ -265,7 +351,36 @@ const OmrDetail = (() => {
     }
     const subj = j.subject_code === null || j.subject_code === undefined ? '과목? 미확인' : j.subject_code === '' ? '' : '과목 ' + j.subject_code;
     open({ title: title || `스캔 #${scanId} · ${subj} ${j.student_id ?? '(번호 없음)'} · ${(j.page ?? 0) + 1}페이지`, flags: j.flags,
-           src: `/api/scans/${scanId}/image/warped`, d: j, focusQ });
+           src: `/api/scans/${scanId}/image/warped`, d: j, focusQ, onFix: fix => serverFix(scanId, j, fix) });
+  }
+  // server corrections: an answer -> override on the submission; an ID / subject digit -> re-assign / re-route the scan
+  const post = async (url, body) => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) return { error: (await r.json().catch(() => ({}))).detail || ('오류 ' + r.status) };
+    return r.json().catch(() => ({}));
+  };
+  function digitsWith(rows, index, choice) {
+    const ds = rows.map((r, i) => i === index ? choice : (r.state === 'blank' ? null : r.value));
+    return ds.some(v => v === null || v === undefined) ? null : ds.join('');
+  }
+  async function serverFix(scanId, j, fix) {
+    if (fix.kind === 'q') {
+      const sub = j.submission_id;
+      if (!sub) return { error: '이 스캔은 아직 학생에 배정되지 않았습니다. 학번을 먼저 정정하세요.' };
+      const out = await post(`/api/submissions/${sub}/override`, { question: fix.q, marked: fix.choice === null ? [] : [fix.choice], note: '스캔 화면에서 정정' });
+      document.dispatchEvent(new CustomEvent('omr-fixed', { detail: { scanId, fix } }));
+      return out;
+    }
+    const rows = fix.kind === 'id' ? j.id : j.subject, v = digitsWith(rows, fix.index, fix.choice);
+    if (v === null) {   // other digits still unknown: just remember this one until the number is complete
+      rows[fix.index] = Object.assign(rows[fix.index], { state: fix.choice === null ? 'blank' : 'single', value: fix.choice });
+      return {};
+    }
+    const out = fix.kind === 'id' ? await post(`/api/scans/${scanId}/assign`, { student_id: v })
+                                  : await post(`/api/scans/${scanId}/route`, { subject: v });
+    if (!out.error && out.submission_id) j.submission_id = out.submission_id;
+    if (!out.error) document.dispatchEvent(new CustomEvent('omr-fixed', { detail: { scanId, fix, value: v, outcome: out } }));
+    return out;
   }
   // any element with data-detail="<scan id>" [data-q="<question>"] opens the detail of that scan
   document.addEventListener('click', ev => {
@@ -280,7 +395,7 @@ const OmrDetail = (() => {
 
 function showDetail(s, d) {
   OmrDetail.open({ title: `${subjLabel(s.subject)} ${s.student_id ?? '(번호 없음)'} · ${s.page + 1}페이지`.trim(), flags: s.flags,
-                   src: 'data:image/jpeg;base64,' + d.img, d });
+                   src: 'data:image/jpeg;base64,' + d.img, d, onFix: fix => applyFix(s, d, fix) });
 }
 
 // ---- overlay (same drawing as the server-based scanner)
@@ -356,10 +471,11 @@ function onResult(e, wms) {
   mm.textContent = ms.length ? '놓친 시트 있음: ' + ms.map(m => (m.serial ? 'No. ' + String(m.serial).padStart(4, '0') : '번호 없음 ' + (m.student_id || '?')) + ` (${m.page + 1}페이지)` + (m.possibly_same_as ? ` - ${m.possibly_same_as}와 같은 시트일 수 있음` : '')).join(', ') + ' - 다시 보여 주세요' : '';
   if (e.commit) {
     const s = e.commit.summary; s.time = new Date().toISOString();
-    beep(); flash(); addScan(s, e.commit.detail);
+    const sev = s.severity || 'ok';
+    feedback(sev); addScan(s, e.commit.detail);
     if (DEV) devOnCommit(s, e.commit);
     $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}`;
-    if (navigator.vibrate) navigator.vibrate(60);
+    if (e.commit.detail && e.commit.detail.img) fixButton(sev, () => showDetail(s, e.commit.detail));
   }
   const now = performance.now();
   if (now - fpsT > 1000) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; }

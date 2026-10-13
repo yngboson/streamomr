@@ -8,24 +8,46 @@ let stream = null, track = null, ws = null, audio = null, running = false;
 let busy = false, lastOv = null, lastState = 'idle', lastSend = 0, torchOn = false;
 let sentDims = '-', frames = 0, fpsT = performance.now(), fps = 0, rtt = 0;
 
-function beep() {
-  if (!audio) return;
-  const o = audio.createOscillator(), g = audio.createGain();
-  o.frequency.value = 1040; o.connect(g); g.connect(audio.destination);
-  g.gain.setValueAtTime(0.2, audio.currentTime); g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.18);
-  o.start(); o.stop(audio.currentTime + 0.2);
+// ---- commit feedback: ok = short high beep + green; minor (answer rows to check) = two mid tones + amber;
+// severe (student ID / subject code not reliably read) = three low buzzes + red, so the person can rescan at once
+const FB_MS = { ok: 350, minor: 2500, severe: 4000 };
+let fbTimer = null;
+function tone(freq, at, dur, type, vol) {
+  const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime + at;
+  o.type = type; o.frequency.value = freq; o.connect(g); g.connect(audio.destination);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.start(t); o.stop(t + dur + 0.02);
 }
-function flash() { stage.classList.add('flash'); setTimeout(() => stage.classList.remove('flash'), 350); }
+function feedback(sev) {
+  sev = FB_MS[sev] ? sev : 'ok';
+  if (audio) {
+    if (sev === 'ok') tone(1040, 0, 0.18, 'sine', 0.2);
+    else if (sev === 'minor') { tone(740, 0, 0.13, 'triangle', 0.28); tone(587, 0.16, 0.16, 'triangle', 0.28); }
+    else for (let k = 0; k < 3; k++) tone(294, k * 0.22, 0.16, 'square', 0.12);
+  }
+  stage.classList.remove('fb-ok', 'fb-minor', 'fb-severe'); void stage.offsetWidth; stage.classList.add('fb-' + sev);
+  clearTimeout(fbTimer); fbTimer = setTimeout(() => stage.classList.remove('fb-' + sev), FB_MS[sev]);
+  if (navigator.vibrate) navigator.vibrate(sev === 'ok' ? 60 : sev === 'minor' ? [80, 60, 80] : [200, 80, 200, 80, 200]);
+}
+const SEV_TEXT = { minor: '확인할 문항 있음', severe: '학번/과목 인식 실패' };
+function fixButton(sev, open) {   // banner button after a non-ok commit: opens the detail with 정정 buttons
+  if (sev === 'ok') return;
+  const b = document.createElement('button'); b.type = 'button'; b.className = 'fixbtn ' + sev;
+  b.textContent = SEV_TEXT[sev] + ' · 정정'; b.onclick = open; $('res').appendChild(b);
+}
 const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
 // subject: digits, "" = form without subject code, null/undefined = not readable
 function subjLabel(subject) { return subject === null || subject === undefined ? '과목? 미확인' : subject === '' ? '' : '과목 ' + subject; }
-function addScan(kind, subject, studentId, page, prepend = true, scanId = null) {
+function addScan(kind, subject, studentId, page, prepend = true, scanId = null, sev = 'ok') {
   const li = document.createElement('li');
+  if (sev !== 'ok') li.style.borderLeft = `4px solid var(--${sev === 'severe' ? 'bad' : 'warn'})`;
   li.innerHTML = `<span><b>${esc(subjLabel(subject))}</b> ${subject === '' ? '' : '&middot;'} <b>${esc(studentId ?? '(번호 없음)')}</b> &middot; ${page + 1}페이지</span><span class="badge ${esc(kind || 'rejected')}">${esc(kind || '?')}</span>`;
   if (scanId) { li.style.cursor = 'pointer'; li.title = '눌러서 인식 상세 보기'; li.onclick = () => OmrDetail.openScan(scanId, `${subjLabel(subject)} ${studentId ?? '(번호 없음)'} · ${page + 1}페이지`.trim()); }
   prepend ? $('recent').prepend(li) : $('recent').append(li);
 }
+// a correction made in the detail view: refresh the list / counts (the scan may have moved to a student)
+document.addEventListener('omr-fixed', () => { loadRecent(); refreshCounts(); });
 async function loadRecent() {
   $('recent').innerHTML = '';
   const id = $('exam').value;
@@ -119,11 +141,12 @@ function connect() {
     mm.textContent = ms.length ? '놓친 시트 있음: ' + ms.map(m => (m.serial ? 'No. ' + String(m.serial).padStart(4, '0') : '번호 없음 ' + (m.student_id || '?')) + ` (${m.page + 1}페이지)` + (m.possibly_same_as ? ` - ${m.possibly_same_as}와 같은 시트일 수 있음` : '')).join(', ') + ' - 다시 보여 주세요' : '';
     if (e.commit) {
       const o = e.commit.outcome, s = e.commit.summary;
-      beep(); flash();
-      addScan(o.kind, o.subject === undefined ? s.subject : o.subject, o.student_id ?? s.student_id, o.page ?? s.page, true, o.scan_id);
+      const sev = s.severity || 'ok';
+      feedback(sev);
+      addScan(o.kind, o.subject === undefined ? s.subject : o.subject, o.student_id ?? s.student_id, o.page ?? s.page, true, o.scan_id, sev);
       $('res').textContent = `${subjLabel(o.subject === undefined ? s.subject : o.subject)} · ${o.student_id ?? s.student_id ?? '(번호 없음)'}`;
+      if (o.scan_id) fixButton(sev, () => OmrDetail.openScan(o.scan_id));
       refreshCounts();
-      if (navigator.vibrate) navigator.vibrate(60);
     }
     const now = performance.now();
     if (now - fpsT > 1000) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; }

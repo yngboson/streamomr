@@ -3,10 +3,12 @@
  * per bubble (green read / red multi / orange doubtful-or-blank), boxes around problem rows, a problem list with
  * per-choice darkness, and - on tap of a problem row or one of its choices - a zoomed crop of that row from the
  * full-resolution sheet (cropped client-side from the same image, so it is as crisp as the stored sheet).
+ * With o.onFix(fix) given, every problem row also gets 정정 buttons: the person picks the right choice / digit and
+ * onFix({kind:'q'|'id'|'subject', index, q, choice}) (choice null = blank) applies it; the row turns green (수정됨).
  * d = {ppm, page_w?, t_lo, t_hi, id_t_lo, id_t_hi, answers:[{q,state,marked,labels,scores,doubt,guessed?,centers}],
  *      id:[{state,value,doubt,guessed?,scores,centers}], subject:[...]}  (centers: mm on the sheet, per choice)  */
 const OmrDetail = (() => {
-  const COL = { on: '#2ecc71', bad: '#ff5252', doubt: '#f5a524', off: 'rgba(120,120,120,.7)' };
+  const COL = { on: '#2ecc71', bad: '#ff5252', doubt: '#f5a524', off: 'rgba(120,120,120,.7)', fixed: '#2ecc71' };
   const CSS = `
 .od-modal { position:fixed; inset:0; background:rgba(0,0,0,.8); z-index:50; overflow:auto; padding:10px; -webkit-overflow-scrolling:touch; }
 .od-modal[hidden] { display:none; }
@@ -16,6 +18,12 @@ const OmrDetail = (() => {
 .od-sheet { width:100%; display:block; border-radius:4px; background:#fff; margin:6px 0; cursor:pointer; }
 .od-row { border:1px solid #2a313b; border-radius:8px; padding:8px; margin:8px 0; }
 .od-row.bad { border-color:var(--bad,#ff5252); } .od-row.doubt { border-color:var(--warn,#f5a524); }
+.od-row.fixed { border-color:#2ecc71; }
+.od-fix { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:8px; padding-top:8px; border-top:1px dashed #2a313b; }
+.od-fix b { font-size:13px; margin-right:2px; }
+.od-fix button { min-width:44px; min-height:40px; font:inherit; font-size:15px; font-weight:700; border-radius:8px; border:1px solid #3a4250; background:#11151a; color:inherit; cursor:pointer; }
+.od-fix button.cur { background:#2ecc71; color:#000; }
+.od-fix button:disabled { opacity:.5; }
 .od-row.flash { outline:2px solid #4dabf7; }
 .od-top { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; cursor:pointer; min-height:32px; }
 .od-tag { font-size:12px; padding:0 7px; border-radius:5px; background:#4dabf7; color:#000; font-weight:700; }
@@ -36,6 +44,7 @@ const OmrDetail = (() => {
   // per-choice verdict: on = counted as marked, bad = counted wrongly (multi), doubt = grey zone / doubtful, off = empty
   function verdicts(r, lo, hi, kind) {
     const marked = kind === 'q' ? r.marked : (r.state === 'blank' ? [] : r.scores.map((v, i) => i).filter(i => r.scores[i] === Math.max(...r.scores) && r.scores[i] >= lo));
+    if (r.fixed) return r.scores.map((v, i) => (kind === 'q' ? r.marked.includes(i) : r.value === i) ? 'on' : 'off');
     return r.scores.map((v, i) => {
       const isMarked = marked.includes(i);
       if (r.state === 'multi' && isMarked) return 'bad';
@@ -44,6 +53,7 @@ const OmrDetail = (() => {
     });
   }
   function rowStatus(r) {
+    if (r.fixed) return ['fixed', '수정됨'];
     if (r.state === 'multi') return ['bad', '복수 마킹'];
     if (r.state === 'blank' && r.doubt) return ['doubt', '애매 (옅은 마킹?)'];
     if (r.state === 'blank') return ['doubt', '공란'];
@@ -63,6 +73,12 @@ const OmrDetail = (() => {
   function chipsFor(r, vs, kind) {
     return '<div class="od-chips">' + r.scores.map((v, i) =>
       `<button type="button" class="od-chip ${vs[i] === 'off' ? '' : vs[i]}" data-c="${i}">${esc(choiceName(r, kind, i))} &middot; ${Math.round(v * 100)}%</button>`).join('') + '</div>';
+  }
+  // 정정 buttons: every choice (answers) or digit 0-9 (ID / subject), plus 공란
+  function fixBar(r, kind) {
+    const cur = kind === 'q' ? (r.state === 'single' ? r.marked[0] : null) : (r.state !== 'blank' ? r.value : null);
+    const opts = r.scores.map((v, i) => `<button type="button" data-v="${i}" class="${r.fixed && cur === i ? 'cur' : ''}">${esc(choiceName(r, kind, i))}</button>`).join('');
+    return `<div class="od-fix"><b>${r.fixed ? '다시 정정' : '정정'}</b>${opts}<button type="button" data-v="" class="${r.fixed && cur === null ? 'cur' : ''}">공란</button></div>`;
   }
   function groupsOf(d) {
     const lo = d.t_lo ?? 0.2, hi = d.t_hi ?? 0.5, idLo = d.id_t_lo ?? lo, idHi = d.id_t_hi ?? hi;
@@ -151,7 +167,7 @@ const OmrDetail = (() => {
       const vs = verdicts(r, g.lo, g.hi, g.kind), box = document.createElement('div');
       box.className = 'od-row ' + cls;
       box.innerHTML = `<div class="od-top"><b>${esc(g.name(r, i))}</b> <span class="${cls === 'bad' ? 'od-err' : 'od-mut'}">${txt}</span> ${guessText(r, g.kind)}<span class="od-mut">▾ 확대</span></div>` +
-        chipsFor(r, vs, g.kind) + '<div class="od-zoom" hidden></div>';
+        chipsFor(r, vs, g.kind) + '<div class="od-zoom" hidden></div>' + (o.onFix ? fixBar(r, g.kind) : '');
       const zoom = box.querySelector('.od-zoom'); let rings = true, sel = null;
       const show = (s, toggle) => {
         if (toggle && !zoom.hidden && sel === s) { zoom.hidden = true; box.querySelectorAll('.od-chip').forEach(b => b.classList.remove('sel')); return; }
@@ -164,7 +180,20 @@ const OmrDetail = (() => {
       };
       box.querySelector('.od-top').onclick = () => show(null, true);
       box.querySelectorAll('.od-chip').forEach(b => { b.onclick = () => show(+b.dataset.c, true); });
-      list.appendChild(box); items.push({ box, zoom, g, r, show });
+      box.querySelectorAll('.od-fix button').forEach(b => { b.onclick = async () => {
+        const choice = b.dataset.v === '' ? null : +b.dataset.v;
+        box.querySelectorAll('.od-fix button').forEach(x => { x.disabled = true; });
+        let err = null;
+        try { const res = await o.onFix({ kind: g.kind, index: i, q: r.q, choice }); if (res && res.error) err = res.error; }
+        catch (e) { err = e.message || String(e); }
+        if (err) { box.querySelectorAll('.od-fix button').forEach(x => { x.disabled = false; });
+          box.querySelector('.od-fix').insertAdjacentHTML('beforeend', `<span class="od-err">${esc(err)}</span>`); return; }
+        if (g.kind === 'q') Object.assign(r, { state: choice === null ? 'blank' : 'single', marked: choice === null ? [] : [choice] });
+        else Object.assign(r, { state: choice === null ? 'blank' : 'single', value: choice });
+        Object.assign(r, { doubt: false, guessed: false, fixed: true });
+        render(Object.assign(o, { focus: [g.kind, i] }), img);
+      }; });
+      list.appendChild(box); items.push({ box, zoom, g, r, show, i });
     }));
     list.insertAdjacentHTML('afterbegin', `<b>${items.length ? '확인할 항목 ' + items.length + '개' : '문제 있는 항목 없음'}</b>`);
     body.appendChild(list);
@@ -185,6 +214,9 @@ const OmrDetail = (() => {
       best[0].box.classList.add('flash'); setTimeout(() => best[0].box.classList.remove('flash'), 900);
     };
     m.hidden = false; m.scrollTop = 0; document.body.style.overflow = 'hidden';
+    const ff = o.focus ? items.find(it => it.g.kind === o.focus[0] && it.i === o.focus[1]) : null;
+    o.focus = null;
+    if (ff) { ff.box.scrollIntoView({ block: 'center' }); ff.box.classList.add('flash'); setTimeout(() => ff.box.classList.remove('flash'), 900); return; }
     const f = o.focusQ ? items.find(it => it.g.kind === 'q' && it.r.q === o.focusQ) : null;
     if (f) { f.show(null, false); f.box.scrollIntoView({ block: 'center' }); }
   }
@@ -210,7 +242,36 @@ const OmrDetail = (() => {
     }
     const subj = j.subject_code === null || j.subject_code === undefined ? '과목? 미확인' : j.subject_code === '' ? '' : '과목 ' + j.subject_code;
     open({ title: title || `스캔 #${scanId} · ${subj} ${j.student_id ?? '(번호 없음)'} · ${(j.page ?? 0) + 1}페이지`, flags: j.flags,
-           src: `/api/scans/${scanId}/image/warped`, d: j, focusQ });
+           src: `/api/scans/${scanId}/image/warped`, d: j, focusQ, onFix: fix => serverFix(scanId, j, fix) });
+  }
+  // server corrections: an answer -> override on the submission; an ID / subject digit -> re-assign / re-route the scan
+  const post = async (url, body) => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) return { error: (await r.json().catch(() => ({}))).detail || ('오류 ' + r.status) };
+    return r.json().catch(() => ({}));
+  };
+  function digitsWith(rows, index, choice) {
+    const ds = rows.map((r, i) => i === index ? choice : (r.state === 'blank' ? null : r.value));
+    return ds.some(v => v === null || v === undefined) ? null : ds.join('');
+  }
+  async function serverFix(scanId, j, fix) {
+    if (fix.kind === 'q') {
+      const sub = j.submission_id;
+      if (!sub) return { error: '이 스캔은 아직 학생에 배정되지 않았습니다. 학번을 먼저 정정하세요.' };
+      const out = await post(`/api/submissions/${sub}/override`, { question: fix.q, marked: fix.choice === null ? [] : [fix.choice], note: '스캔 화면에서 정정' });
+      document.dispatchEvent(new CustomEvent('omr-fixed', { detail: { scanId, fix } }));
+      return out;
+    }
+    const rows = fix.kind === 'id' ? j.id : j.subject, v = digitsWith(rows, fix.index, fix.choice);
+    if (v === null) {   // other digits still unknown: just remember this one until the number is complete
+      rows[fix.index] = Object.assign(rows[fix.index], { state: fix.choice === null ? 'blank' : 'single', value: fix.choice });
+      return {};
+    }
+    const out = fix.kind === 'id' ? await post(`/api/scans/${scanId}/assign`, { student_id: v })
+                                  : await post(`/api/scans/${scanId}/route`, { subject: v });
+    if (!out.error && out.submission_id) j.submission_id = out.submission_id;
+    if (!out.error) document.dispatchEvent(new CustomEvent('omr-fixed', { detail: { scanId, fix, value: v, outcome: out } }));
+    return out;
   }
   // any element with data-detail="<scan id>" [data-q="<question>"] opens the detail of that scan
   document.addEventListener('click', ev => {

@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from omr import db, markers as mk
+from omr.identity import severity
 from omr.layout import Template
 from omr.recognize import recognize
 from omr.review import annotate_warped, cached_preview
@@ -157,7 +158,7 @@ def summarize(result) -> dict:
             "n_multi": sum(1 for a in result.answers if a.state == "multi"),
             "n_doubtful": sum(1 for a in result.answers if a.ambiguous),
             "flags": list(result.flags), "needs_review": result.needs_review,
-            "sharpness": (result.quality or {}).get("sharpness")}
+            "sharpness": (result.quality or {}).get("sharpness"), "severity": severity(result)}
 
 
 def create_app(data_dir: str = "data", workers: int = 2) -> FastAPI:
@@ -349,7 +350,15 @@ def create_app(data_dir: str = "data", workers: int = 2) -> FastAPI:
         def rows(items, centers):
             return [dict(x, centers=centers[i], doubt=bool(x.get("ambiguous"))) for i, x in enumerate(items or []) if i < len(centers)]
         answers = [dict(a, q=a["number"]) for a in rows(d.get("answers"), bc["answers"])]
-        return {"ppm": d.get("px_per_mm"), "page_w": layout.page_w, "page": r["page"], "student_id": r["student_id_raw"],
+        with db.session(svc.db_path) as c:
+            sub = c.execute("SELECT id FROM submissions WHERE adopted_scan_id=?", (scan_id,)).fetchone()
+            ovr = {} if sub is None else {o["question"]: o["marked_json"] for o in c.execute(
+                "SELECT question, marked_json FROM answer_overrides WHERE submission_id=? ORDER BY id", (sub["id"],))}
+        for a in answers:                      # show what a person already corrected (latest wins; null = removed)
+            if ovr.get(a["q"]) is not None:
+                m = json.loads(ovr[a["q"]])
+                a.update(state="blank" if not m else "single" if len(m) == 1 else "multi", marked=m, doubt=False, fixed=True)
+        return {"submission_id": None if sub is None else sub["id"], "scan_id": scan_id,"ppm": d.get("px_per_mm"), "page_w": layout.page_w, "page": r["page"], "student_id": r["student_id_raw"],
                 "subject_code": d.get("subject"), "flags": d.get("flags") or [],
                 "t_lo": cal.get("t_lo"), "t_hi": cal.get("t_hi"), "id_t_lo": cal.get("id_t_lo"), "id_t_hi": cal.get("id_t_hi"),
                 "answers": answers, "id": rows(d.get("id_digits"), bc.get("id") or []),
@@ -453,7 +462,10 @@ def create_app(data_dir: str = "data", workers: int = 2) -> FastAPI:
         if commit is not None:
             r = commit["result"]
             outcome = svc.ingest(r, images={"original": commit["payload"]}, source="stream")
-            ev["commit"] = {"outcome": outcome.to_dict(), "summary": summarize(r), "frames": commit["frames"]}
+            summ = summarize(r)
+            if outcome.kind in ("unassigned", "rejected"):
+                summ["severity"] = "severe"
+            ev["commit"] = {"outcome": outcome.to_dict(), "summary": summ, "frames": commit["frames"]}
         missed = session.missed()
         if missed:
             ev["missed"] = missed

@@ -54,3 +54,24 @@ def sheet_key(r) -> str:
 
 def format_serial(serial: Optional[int]) -> str:
     return f"No. {int(serial):04d}" if serial else ""
+
+
+# ---- commit feedback for the person scanning (server and standalone use the same rule)
+SEVERE_FLAGS = ("id_unreadable", "id_guessed", "id_blank", "subject_unreadable", "subject_guessed", "subject_blank")
+QUIET_FLAGS = ("serial_unreadable", "corner_hidden", "marker_dropped")   # informational: no warning
+
+
+def severity(r) -> str:
+    """'severe' = the sheet's identity (student ID / subject code) is not reliably read: rescan or fix now;
+    'minor' = identity fine but some answer rows need a look (ambiguous / multi / guessed / other review flags);
+    'ok' = nothing to check.  Works on a RecognitionResult or its to_dict()."""
+    flags = list(_get(r, "flags", None) or [])
+    has_id = bool(_get(r, "id_digits", None))
+    if any(f in SEVERE_FLAGS for f in flags) or (has_id and not _get(r, "student_id", None)):
+        return "severe"
+    answers = _get(r, "answers", None) or []
+    doubtful = any((a.get("ambiguous") or a.get("state") == "multi") if isinstance(a, dict)
+                   else (a.ambiguous or a.state == "multi") for a in answers)
+    if doubtful or _get(r, "needs_review", False) or any(f not in QUIET_FLAGS for f in flags):
+        return "minor"
+    return "ok"
