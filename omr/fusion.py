@@ -25,6 +25,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from .fastops import nanmedian0
 from .recognize import UNRELIABLE_FILL, UNRELIABLE_STRENGTH, PageRaw, decide_page, decision_sig, unreliable_mask
 
 WINDOW = 12              # most recent frames fused (the median adapts, memory is bounded)
@@ -96,7 +97,7 @@ class Track:
                 bad = unreliable_mask(F, S)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
-                    mf, ms = np.nanmedian(np.where(bad, np.nan, F), axis=0), np.nanmedian(np.where(bad, np.nan, S), axis=0)
+                    mf, ms = nanmedian0(np.where(bad, np.nan, F)), nanmedian0(np.where(bad, np.nan, S))
                 allbad = bad.all(axis=0)
                 return np.where(allbad, UNRELIABLE_FILL, mf), np.where(allbad, UNRELIABLE_STRENGTH, ms)
 
@@ -106,7 +107,7 @@ class Track:
                     return None
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
-                    return np.nanmedian(np.stack(have), axis=0)
+                    return nanmedian0(np.stack(have))
 
             FA, SA = med_fs("FA", "SA")
             FI, SI = med_fs("FI", "SI")
