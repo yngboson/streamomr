@@ -26,6 +26,49 @@ const devQ = q => Object.entries(q || {}).map(([k, v]) => `${k}=${typeof v === '
 function devOnStart() {
   const st = track && track.getSettings ? track.getSettings() : {};
   devLog('SESSION', `start camera ${video.videoWidth}x${video.videoHeight} settings=${JSON.stringify(st)}`);
+  devVideoStart();
+}
+function devOnStop() { devVideoStop(); }
+
+// ---- optional camera video recording (MediaRecorder on the same camera stream; full camera resolution, independent of
+// the frames the recognizer processed).  Each start..stop is one segment; segment start/end are in session seconds (+t in
+// log.txt, t_s in frames.csv), so a frame row can be found in the video at (t_s - start_s).
+const DEV_VIDEO_MAX_BYTES = 400e6, DEV_VIDEO_BPS = 4e6;
+const devVideos = [];   // {name, mime, start_s, end_s, chunks: [Blob], bytes, done: Promise}
+let devRec = null;
+const devVideoOn = () => { try { return localStorage.getItem('dev-video') !== '0'; } catch (err) { return true; } };
+function devVideoMime() {
+  if (!window.MediaRecorder) return null;
+  for (const m of ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'])
+    if (!MediaRecorder.isTypeSupported || MediaRecorder.isTypeSupported(m)) return m;
+  return '';
+}
+function devVideoStart() {
+  if (!devVideoOn() || !stream) return;
+  const used = devVideos.reduce((a, v) => a + v.bytes, 0);
+  if (used >= DEV_VIDEO_MAX_BYTES) { devLog('VIDEO', `not recording: ${Math.round(used / 1e6)} MB already stored (limit ${DEV_VIDEO_MAX_BYTES / 1e6} MB)`); return; }
+  const mime = devVideoMime();
+  if (mime === null) { devLog('VIDEO', 'MediaRecorder not available in this browser'); return; }
+  let rec;
+  try { rec = new MediaRecorder(stream, Object.assign({ videoBitsPerSecond: DEV_VIDEO_BPS }, mime ? { mimeType: mime } : {})); }
+  catch (err) { devLog('VIDEO', 'cannot record: ' + (err && err.message || err)); return; }
+  const type = rec.mimeType || mime || 'video/mp4', ext = /mp4/.test(type) ? 'mp4' : 'webm';
+  const seg = { name: `video/segment_${dpad(devVideos.length + 1)}.${ext}`, mime: type, start_s: +((Date.now() - devT0) / 1000).toFixed(2), end_s: null, chunks: [], bytes: 0 };
+  seg.done = new Promise(res => { rec.onstop = () => { seg.end_s = +((Date.now() - devT0) / 1000).toFixed(2); devLog('VIDEO', `${seg.name} stopped at +${seg.end_s}s, ${(seg.bytes / 1e6).toFixed(1)} MB`); res(); }; });
+  rec.ondataavailable = ev => {
+    if (!ev.data || !ev.data.size) return;
+    seg.chunks.push(ev.data); seg.bytes += ev.data.size;
+    if (devVideos.reduce((a, v) => a + v.bytes, 0) >= DEV_VIDEO_MAX_BYTES && rec.state === 'recording') { devLog('VIDEO', 'size limit reached - stopping'); rec.stop(); }
+    devRefresh();
+  };
+  rec.onerror = ev => devLog('VIDEO', 'recorder error: ' + ((ev.error && ev.error.message) || ev.error || ev));
+  rec.start(1000);
+  devVideos.push(seg); devRec = rec;
+  devLog('VIDEO', `${seg.name} recording (${type}, ~${DEV_VIDEO_BPS / 1e6} Mbit/s) from +${seg.start_s}s`);
+}
+async function devVideoStop() {
+  const rec = devRec; devRec = null;
+  if (rec && rec.state !== 'inactive') { rec.stop(); await devVideos[devVideos.length - 1].done; }
 }
 
 function devOnResult(e) {
@@ -150,6 +193,9 @@ const devCsv = rows => '﻿' + rows.map(r => r.map(csvCell).join(',')).join('\n'
 async function devExport() {
   const btn = $('dev-zip'); btn.disabled = true; btn.textContent = '만드는 중...';
   try {
+    const wasRecording = !!devRec;
+    if (wasRecording) await devVideoStop();   // close the running segment so it is complete in the zip
+
     const files = [], idx = [['n', 'time', 'folder', 'student_id', 'subject', 'page', 'total_pages', 'needs_review', 'flags', 'n_doubtful_rows', 'n_blank', 'n_multi', 'doubt_items', 'frame', 'sheet', 'sheet_marked', 'trace', 'scan_json']];
     for (const rec of devScans) {
       const s = rec.summary, d = rec.detail, f = rec.folder, names = [];
@@ -181,8 +227,14 @@ async function devExport() {
       const d = x.dev || {};
       fr.push([x.n, x.blob ? x.file : '', x.time, x.status, x.state, x.hint, x.size, (d.markers || []).join(' '), (d.missing || []).join(' '), (d.flags || []).join(';'), JSON.stringify(d.quality || {})]);
     }
+    const videos = [];
+    for (const v of devVideos) {
+      if (!v.bytes) continue;
+      files.push({ name: v.name, data: await devBytes(new Blob(v.chunks, { type: v.mime })) });
+      videos.push({ file: v.name, mime: v.mime, start_s: v.start_s, end_s: v.end_s, mb: +(v.bytes / 1e6).toFixed(1) });
+    }
     const st = track && track.getSettings ? track.getSettings() : {};
-    const session = { build: devBuild, exported: new Date().toISOString(), page: location.href, userAgent: navigator.userAgent, platform: navigator.platform,
+    const session = { videos, build: devBuild, exported: new Date().toISOString(), page: location.href, userAgent: navigator.userAgent, platform: navigator.platform,
       screen: `${screen.width}x${screen.height}@${window.devicePixelRatio}`, camera: { video: `${video.videoWidth}x${video.videoHeight}`, settings: st },
       pyodide: PYODIDE_BASE, scans: devScans.length, doubtful_scans: devScans.filter(r => r.doubts.length).length, failure_frames: devFails.length, frame_rows: devFrames.length, log_lines: devLines.length };
     files.unshift({ name: 'README.txt', data: devText(DEV_README) }, { name: 'session.json', data: devText(JSON.stringify(session, null, 1)) },
@@ -192,6 +244,7 @@ async function devExport() {
     a.download = 'streamomr-dev_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.zip';
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
     devLog('EXPORT', `zip with ${files.length} files`);
+    if (wasRecording && running) devVideoStart();   // keep recording after an export taken mid-session
   } catch (err) { devLog('ERROR', 'export failed: ' + (err && err.message || err)); alert('ZIP 생성 실패: ' + (err && err.message || err)); }
   btn.disabled = false; btn.textContent = '로그 ZIP 다운로드';
 }
@@ -214,6 +267,8 @@ scans/NNN_<수험번호>/   (모든 스캔, 잘 읽힌 것도 동일하게 저�
   frame.jpg        확정 순간의 카메라 프레임
   crops/<q12|id_3|subject_1>.jpg   모든 행의 확대 크롭 (링 포함) / ..._raw.jpg 는 링 없는 원본 픽셀
 failures/        시트가 보이는데 읽지 못한 프레임 JPEG (최대 ${DEV_MAX_FAIL}장, ${DEV_FAIL_GAP_MS}ms 간격)
+video/segment_NN.mp4 (또는 .webm)  '영상도 저장'을 켠 경우 카메라 영상 원본(시작~중지 한 구간마다 파일 하나, 약 4 Mbit/s).
+                 session.json의 videos[]에 start_s/end_s(세션 경과초)가 있음: frames.csv의 t_s 행은 영상의 (t_s - start_s)초 지점.
 failures.csv     각 실패 프레임의 상태, 마커 id, 가려진 모서리, 품질 수치(header_reg_mm, meta_contrast ...)
 
 용어: 마킹%(mark%) = 버블 원 면적 중 잉크로 칠해진 비율(fill). 판정에 쓰는 값이며 합쳐진 여러 프레임의 중앙값, 괄호에 프레임별 min..max, 표준편차.
@@ -226,15 +281,21 @@ failures.csv     각 실패 프레임의 상태, 마커 id, 가려진 모서리,
 (function devPanel() {
   const card = document.createElement('div'); card.className = 'card';
   card.innerHTML = '<h1>개발용 로그 <span class="tag warn">DEV</span></h1><div class="mut small" id="dev-stats"></div>' +
-    '<div class="row" style="margin:8px 0"><button id="dev-zip">로그 ZIP 다운로드</button><button id="dev-clear" class="secondary">로그 비우기</button></div>' +
+    '<div class="row" style="margin:8px 0"><button id="dev-zip">로그 ZIP 다운로드</button><button id="dev-clear" class="secondary">로그 비우기</button>' +
+    '<label class="small" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="dev-video"> 영상도 저장 (다음 시작부터)</label></div>' +
     '<pre id="dev-tail" class="mut small" style="white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto;margin:0"></pre>';
   document.querySelector('.scan').appendChild(card);
   $('dev-zip').onclick = devExport;
-  $('dev-clear').onclick = () => { if (confirm('로그와 저장된 스캔/실패 프레임을 모두 비울까요?')) { devLines.length = 0; devScans.length = 0; devFails.length = 0; devFrames.length = 0; devLog('SESSION', 'log cleared'); } };
+  $('dev-video').checked = devVideoOn();
+  $('dev-video').onchange = ev => { try { localStorage.setItem('dev-video', ev.target.checked ? '1' : '0'); } catch (err) {}
+    if (!ev.target.checked) devVideoStop(); else if (running && !devRec) devVideoStart(); };
+  $('dev-clear').onclick = () => { if (confirm('로그와 저장된 스캔/실패 프레임을 모두 비울까요?')) { devLines.length = 0; devScans.length = 0; devFails.length = 0; devFrames.length = 0; devVideos.splice(0, devRec ? devVideos.length - 1 : devVideos.length); devLog('SESSION', 'log cleared'); } };
   devLog('SESSION', `dev build ${devBuild}  UA=${navigator.userAgent}`);
 })();
 function devRefresh() {
   const t = $('dev-tail'); if (!t) return;
-  $('dev-stats').textContent = `스캔 ${devScans.length}건 (애매 ${devScans.filter(r => r.doubts.length).length}) · 실패 프레임 ${devFails.length} · 로그 ${devLines.length}줄`;
+  const vmb = devVideos.reduce((a, v) => a + v.bytes, 0) / 1e6;
+  $('dev-stats').textContent = `스캔 ${devScans.length}건 (애매 ${devScans.filter(r => r.doubts.length).length}) · 실패 프레임 ${devFails.length} · 로그 ${devLines.length}줄` +
+    (devVideos.length ? ` · 영상 ${devVideos.length}구간 ${vmb.toFixed(0)} MB${devRec ? ' (녹화 중)' : ''}` : '');
   t.textContent = devLines.slice(-8).join('\n'); t.scrollTop = t.scrollHeight;
 }
