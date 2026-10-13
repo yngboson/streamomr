@@ -42,3 +42,38 @@ def test_plain_texture_is_not_a_marker():
     img = cv2.GaussianBlur(rng.integers(0, 255, (400, 400)).astype(np.uint8), (0, 0), 3)
     found, dup, _ = detect.find_markers(img)
     assert found == {} and not dup
+
+
+def test_empty_scene_costs_two_passes():
+    rng = np.random.default_rng(1)
+    img = cv2.GaussianBlur(rng.integers(0, 255, (600, 800)).astype(np.uint8), (0, 0), 3)
+    _, _, info = detect.find_markers(img)
+    assert info["detect_passes"] == 2                # no marker-like candidate: no speculative passes
+
+
+def test_markerlike_counts_damaged_markers_not_texture():
+    img, o = _page(5)
+    q = np.float64([[o, o], [o + 72, o], [o + 72, o + 72], [o, o + 72]])
+    # a marker whose inner bits are scrambled to a word not in the dictionary is still marker-like (border + quiet zone)
+    bad = img.copy()
+    bad[o + 14:o + 58, o + 14:o + 58] = 0
+    assert detect.markerlike(bad, [q], 10.0) == 1
+    rng = np.random.default_rng(2)
+    tex = cv2.GaussianBlur(rng.integers(0, 255, (400, 400)).astype(np.uint8), (0, 0), 3)
+    assert detect.markerlike(tex, [q * 0.5 + 100], 10.0) == 0
+
+
+def test_off_frame_prediction_needs_missing_markers_outside():
+    from omr import layout as lay
+    rects = lay.marker_rects(0)
+    sc = 3.0
+    def quad(c, shift=(0, 0)):
+        x, y, w, h = rects[c]
+        return np.float64([[x, y], [x + w, y], [x + w, y + h], [x, y + h]]) * sc + shift
+    m = detect._Merge()
+    first = ['TL', 'TR']
+    for c in first:
+        m.found[mk.marker_id(0, c)] = quad(c)
+    big = (4000, 4000)                                # whole sheet inside the frame: the other two corners must exist
+    assert not detect._off_frame(m, big)
+    assert detect._off_frame(m, (int(quad('TL')[:, 1].max()) + 60, 4000))   # frame ends under the top row: BL / BR are far below
