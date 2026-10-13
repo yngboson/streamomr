@@ -807,6 +807,37 @@ def _relative_marks(md: Optional[np.ndarray], strict: bool):
     return [int(i) for i in idx], ex[idx]
 
 
+_OTHERS: Dict[int, np.ndarray] = {}
+
+
+def _rel_rows(M: Optional[np.ndarray], strict: bool = False):
+    """`_relative_marks` for every row of a mean-darkness matrix (rows x choices) in one vectorised pass (numerically the
+    same numbers: the median of the OTHER choices, float32)."""
+    if M is None:
+        return None
+    M = np.asarray(M)
+    if M.ndim != 2:
+        return [([], np.zeros(0))] * len(M)
+    n, k = M.shape
+    if k < 3:
+        return [([], np.zeros(0))] * n
+    oth = _OTHERS.get(k)
+    if oth is None:
+        oth = _OTHERS[k] = np.array([[j for j in range(k) if j != i] for i in range(k)])
+    ok = ~np.isnan(M).any(axis=1)
+    out = [([], np.zeros(0))] * n
+    if not ok.any():
+        return out
+    sel = np.nonzero(ok)[0]
+    Ms = M[sel]
+    ex = Ms - np.median(Ms[:, oth], axis=2)
+    hit = ex >= REL_MARGIN
+    for r in np.nonzero(hit.any(axis=1))[0]:
+        idx = np.nonzero(hit[r])[0]
+        out[sel[r]] = ([int(i) for i in idx], ex[r][idx])
+    return out
+
+
 def _calibrate(F: np.ndarray, ink: float, default_typ: Optional[float] = None, min_strength: float = MIN_STRENGTH) -> _Calib:
     """Page-level thresholds from the fills of all bubbles (F: questions x choices)."""
     top = F.max(axis=1)
@@ -817,12 +848,13 @@ def _calibrate(F: np.ndarray, ink: float, default_typ: Optional[float] = None, m
 
 
 def _decide(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = False, md: Optional[np.ndarray] = None,
-            trust_rel: bool = True):
+            trust_rel: bool = True, pre=None):
     """Absolute rules (`_decide_abs`), plus the relative rule (REL_MARGIN) for rows the absolute rules cannot call
     with confidence: a faint pencil mark under glare is only ~20 % darker than the paper but clearly darker than its
     neighbours.  The relative rule only ADDS reads to rows that would otherwise be blank / flagged guesses; a row with
     a confident absolute mark is never changed (erasure ghosts and strays beside a real mark stay out)."""
-    state, marked, conf, amb, confident = _decide_abs(f, strength, c, strict)
+    # pre = ((_decide_abs result), (_relative_marks result)) already computed by the caller for this very row
+    state, marked, conf, amb, confident = _decide_abs(f, strength, c, strict) if pre is None else pre[0]
     if md is None or not trust_rel:
         return state, marked, conf, amb
     if confident:
@@ -831,7 +863,7 @@ def _decide(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = False
         if marked and not amb and any(md[i] == 0.0 for i in marked):
             return state, marked, conf, True
         return state, marked, conf, amb
-    rel, ex = _relative_marks(md, strict)
+    rel, ex = _relative_marks(md, strict) if pre is None else pre[1]
     if not rel:
         return state, marked, conf, amb
     sure = ex.min() >= (REL_SURE_DIGIT if strict else REL_SURE)
@@ -940,7 +972,7 @@ def _guess(f: np.ndarray, strength: np.ndarray, c: _Calib, md: Optional[np.ndarr
     return None
 
 
-def _read_digits(F, S_, cal, verified, M_=None, trust_rel=True):
+def _read_digits(F, S_, cal, verified, M_=None, trust_rel=True, pre=None):
     """Digit columns (ID, subject code): strict rules.  A digit is CONFIDENT only when unambiguous; an uncertain column
     (ambiguous, or alignment unverified) still carries its best guess (`_guess`), marked `guessed` and ambiguous.  A
     clearly blank column, or one where nothing stands out, has no value.  Returns (digits, value string or None,
@@ -949,7 +981,8 @@ def _read_digits(F, S_, cal, verified, M_=None, trust_rel=True):
     digits = []
     for di, (f, st) in enumerate(zip(F, S_)):
         md = None if M_ is None else M_[di]
-        state, marked, conf, amb = _decide(f, st, cal, strict=True, md=md, trust_rel=trust_rel)
+        state, marked, conf, amb = _decide(f, st, cal, strict=True, md=md, trust_rel=trust_rel,
+                                           pre=None if pre is None else pre[di])
         val, guessed = None, False
         if state == "single" and not amb and verified:
             val = int(marked[0])
@@ -971,14 +1004,15 @@ REL_STRONG = 0.30           # a region (not the whole page) is trusted on marks 
 REL_TRUST_MIN_DIGITS = 3    # ID / subject block: at least this many digit columns with a relative-only mark
 
 
-def _rel_evidence(F, S_, M_, cal, strict):
-    """Per row: (has a relative-only mark, the same with excess >= REL_STRONG, ghost-like other choices beside a confident mark)."""
+def _rel_evidence(F, S_, M_, cal, strict, pre=None):
+    """Per row: (has a relative-only mark, the same with excess >= REL_STRONG, ghost-like other choices beside a confident mark).
+    pre: per row ((_decide_abs result), (_relative_marks result)) when the caller has them."""
+    if pre is None:
+        pre = _pre_rows(F, S_, M_, cal, strict)
     rel_only = np.zeros(len(F), bool)
     strong = np.zeros(len(F), bool)
     ghosts = np.zeros(len(F), int)
-    for i, (f, st, md) in enumerate(zip(F, S_, M_)):
-        state, marked, conf, amb, confident = _decide_abs(f, st, cal, strict)
-        rel, ex = _relative_marks(md, strict)
+    for i, ((state, marked, conf, amb, confident), (rel, ex)) in enumerate(pre):
         if confident:
             ghosts[i] = len([j for j in rel if j not in marked])
         elif rel:
@@ -987,7 +1021,15 @@ def _rel_evidence(F, S_, M_, cal, strict):
     return rel_only, strong, ghosts
 
 
-def _rel_trust_answers(raw: PageRaw, cal: _Calib):
+def _pre_rows(F, S_, M_, cal, strict):
+    """Absolute decision + relative marks of every row, computed once (shared by the trust evidence and the decisions)."""
+    rel = _rel_rows(M_, strict)
+    if rel is None:
+        rel = [([], np.zeros(0))] * len(F)
+    return [(_decide_abs(f, st, cal, strict), r) for f, st, r in zip(F, S_, rel)]
+
+
+def _rel_trust_answers(raw: PageRaw, cal: _Calib, pre=None):
     """Per question: does the page, or ITS REGION, say that relative-only marks are marks rather than erasure ghosts?  A faint
     graphite mark and the ghost of an erased one look alike (both ~15-25 % darker than paper, evenly), so the relative rule
     applies only where (a) a large share of the questions has such a mark and nothing else explains them - the sheet is
@@ -1000,7 +1042,7 @@ def _rel_trust_answers(raw: PageRaw, cal: _Calib):
     n = len(raw.numbers)
     if raw.MA is None or not n:
         return np.zeros(n, bool), False
-    rel_only, strong, ghosts = _rel_evidence(raw.FA, raw.SA, raw.MA, cal, False)
+    rel_only, strong, ghosts = _rel_evidence(raw.FA, raw.SA, raw.MA, cal, False, pre)
     if rel_only.sum() >= REL_TRUST_ROWS * n and ghosts.sum() <= REL_TRUST_GHOSTS * n:
         return np.ones(n, bool), True
     out = np.zeros(n, bool)
@@ -1011,12 +1053,12 @@ def _rel_trust_answers(raw: PageRaw, cal: _Calib):
     return out, False
 
 
-def _rel_trust_digits(F, S_, M_, cal) -> bool:
+def _rel_trust_digits(F, S_, M_, cal, pre=None) -> bool:
     """The same for the ID + subject block as one region (strict digit rules): written in pencil next to a pen-written
     answer area, the block has its own evidence - most of its columns hold a relative-only mark and none shows a ghost."""
     if M_ is None or not len(F):
         return False
-    rel_only, strong, ghosts = _rel_evidence(F, S_, M_, cal, True)
+    rel_only, strong, ghosts = _rel_evidence(F, S_, M_, cal, True, pre)
     n = len(F)
     return bool(strong.sum() >= max(REL_TRUST_MIN_DIGITS, REL_TRUST_ROWS * n) and ghosts.sum() <= REL_TRUST_GHOSTS * n)
 
@@ -1026,10 +1068,11 @@ def decide_page(raw: PageRaw) -> PageDecision:
     track-fused measurements by `omr.fusion`."""
     cal = _calibrate(raw.FA, raw.ink, min_strength=raw.min_strength)
     answers = []
-    trust, page_trust = _rel_trust_answers(raw, cal)
+    preA = _pre_rows(raw.FA, raw.SA, raw.MA, cal, False)         # absolute decision + relative marks per row, computed once
+    trust, page_trust = _rel_trust_answers(raw, cal, preA)
     MA = raw.MA if raw.MA is not None else [None] * len(raw.numbers)
-    for n, lab, f, st, md, tr in zip(raw.numbers, raw.labels, raw.FA, raw.SA, MA, trust):
-        state, marked, conf, amb = _decide(f, st, cal, md=md, trust_rel=bool(tr))
+    for n, lab, f, st, md, tr, pre in zip(raw.numbers, raw.labels, raw.FA, raw.SA, MA, trust, preA):
+        state, marked, conf, amb = _decide(f, st, cal, md=md, trust_rel=bool(tr), pre=pre)
         amb = bool(amb or not raw.verified)
         guess = None
         if amb:       # an uncertain row keeps its flag AND gets the most plausible value (a clear blank / confident row: none)
@@ -1043,8 +1086,10 @@ def decide_page(raw: PageRaw) -> PageDecision:
     ical = _calibrate(FD, raw.ink, default_typ=cal.typ, min_strength=raw.min_strength)
     SD = raw.SI if raw.SS is None else np.concatenate([raw.SI, raw.SS])
     MD = None if raw.MI is None else (raw.MI if raw.MS is None else np.concatenate([raw.MI, raw.MS]))
-    dtrust = page_trust or _rel_trust_digits(FD, SD, MD, ical)
-    digits, student_id, why, gs = _read_digits(raw.FI, raw.SI, ical, raw.verified, raw.MI, dtrust)
+    preD = _pre_rows(FD, SD, MD, ical, True)
+    nI = len(raw.FI)
+    dtrust = page_trust or _rel_trust_digits(FD, SD, MD, ical, preD)
+    digits, student_id, why, gs = _read_digits(raw.FI, raw.SI, ical, raw.verified, raw.MI, dtrust, preD[:nI])
     for d, di in zip(digits, raw.digit_index):
         d.index = di
     flags: List[str] = [] if why is None else ["id_" + why]
@@ -1052,7 +1097,7 @@ def decide_page(raw: PageRaw) -> PageDecision:
         flags.append("id_guessed")
     sdigits, subject = [], ""
     if raw.FS is not None and len(raw.FS):
-        sdigits, subject, why, gs = _read_digits(raw.FS, raw.SS, ical, raw.verified, raw.MS, dtrust)
+        sdigits, subject, why, gs = _read_digits(raw.FS, raw.SS, ical, raw.verified, raw.MS, dtrust, preD[nI:])
         if why is not None:
             flags.append("subject_" + why)
         if gs and subject is not None:
