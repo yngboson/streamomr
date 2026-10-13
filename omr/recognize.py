@@ -731,6 +731,26 @@ def _ink_level(groups, floor: float):
 UNRELIABLE_FILL, UNRELIABLE_STRENGTH = 0.5, 0.3   # an unknowable bubble (see omr.illum): ambiguous, never a read digit
 
 
+def unreliable_mask(f: np.ndarray, strength: np.ndarray) -> np.ndarray:
+    """Bubbles carrying the UNRELIABLE sentinel of `_fill` (measured fill/strength are never exactly this pair)."""
+    return (np.asarray(f) == UNRELIABLE_FILL) & (np.asarray(strength) == UNRELIABLE_STRENGTH)
+
+
+def _weak_pick(f: np.ndarray, strength: np.ndarray, t_lo: float, need: float = 0.0) -> list:
+    """Best-guess choice of a row with no mark reaching t_in: the fullest MEASURED bubble (at least `need`), never a tie
+    broken by index (equal fullest bubbles -> no pick, the row stays blank and flagged).  An unknowable (sentinel) bubble is
+    picked only by elimination: it is the single one and every measured bubble of the row is clearly out (< t_lo)."""
+    bad = unreliable_mask(f, strength)
+    ok = ~bad
+    if bad.sum() == 1 and ok.any() and (f[ok] < t_lo).all():
+        return [int(np.argmax(bad))]
+    if not ok.any():
+        return []
+    top = float(f[ok].max())
+    best = np.nonzero(ok & (f >= top - 1e-6))[0]
+    return [int(best[0])] if len(best) == 1 and top >= need else []
+
+
 def _fill(D: np.ndarray, ink: float, unreliable: Optional[np.ndarray] = None):
     """(fill, strength) per bubble.
 
@@ -842,7 +862,7 @@ def _decide_abs(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = F
     if not (f >= t_in).any():
         if fmax < c.t_lo:
             return "blank", [], float(min(1.0, 0.5 + 0.5 * (c.t_lo - fmax) / c.t_lo)), False, False
-        guess = [int(np.argmax(f))] if fmax >= 0.5 * (c.t_lo + c.t_hi) else []  # best guess, always flagged
+        guess = _weak_pick(f, strength, c.t_lo, 0.5 * (c.t_lo + c.t_hi)) if fmax >= 0.5 * (c.t_lo + c.t_hi) else []  # best guess, always flagged
         return ("single" if guess else "blank"), guess, 0.2, True, False
     r = f / fmax
     is_in = (f >= t_in) & (r >= 0.7) & (strength >= c.min_strength)
@@ -850,7 +870,8 @@ def _decide_abs(f: np.ndarray, strength: np.ndarray, c: _Calib, strict: bool = F
     grey = ~is_in & ~is_out
     marked = [int(i) for i in np.nonzero(is_in)[0]]
     if not marked:  # filled but weak (smudge / ghost): best guess, always flagged
-        return "single", [int(np.argmax(f))], 0.2, True, False
+        pick = _weak_pick(f, strength, c.t_lo)
+        return ("single" if pick else "blank"), pick, 0.2, True, False
     # confidence: how far the weakest "in" bubble is above the threshold, and how small the strongest
     # competing bubble is relative to the fullest one
     conf_in = float(np.clip(0.5 + (f[is_in] - (t_in[is_in] if strict else c.t_hi)).min() / 0.3, 0.0, 1.0))
@@ -903,7 +924,7 @@ def _guess(f: np.ndarray, strength: np.ndarray, c: _Calib, md: Optional[np.ndarr
     """Most plausible choice of an UNCERTAIN row, or None when no choice stands out (then the row stays without a value).
     Used only for rows that are already flagged: a clearly blank row never gets a guess.  Unknowable bubbles (the
     UNRELIABLE sentinel of `_fill`) are never picked - their value is invented, not measured."""
-    ok = ~((f == UNRELIABLE_FILL) & (strength == UNRELIABLE_STRENGTH))
+    ok = ~unreliable_mask(f, strength)
     if f.size >= 2 and ok.sum() >= 1:
         cand = np.nonzero(ok)[0]
         order = cand[np.argsort(-f[cand])]

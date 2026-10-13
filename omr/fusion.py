@@ -25,7 +25,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from .recognize import PageRaw, decide_page
+from .recognize import UNRELIABLE_FILL, UNRELIABLE_STRENGTH, PageRaw, decide_page, unreliable_mask
 
 WINDOW = 12              # most recent frames fused (the median adapts, memory is bounded)
 CONTRADICT_FILL = 0.6    # per-bubble fill swing that counts as a contradiction ...
@@ -82,8 +82,19 @@ class Track:
     def fused_raw(self) -> PageRaw:
         if self._raw is None:
             fr = list(self.frames)
-            med = lambda f: np.median(np.stack([getattr(x, f) for x in fr]), axis=0)
             r0 = fr[-1]
+
+            def med(f):
+                return np.median(np.stack([getattr(x, f) for x in fr]), axis=0)
+
+            def med_fs(ff, sf):    # fill + strength: a frame that judged a bubble unknowable (sentinel) does not vote on it; unknowable in every frame -> stays unknowable
+                F, S = np.stack([getattr(x, ff) for x in fr]), np.stack([getattr(x, sf) for x in fr])
+                bad = unreliable_mask(F, S)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    mf, ms = np.nanmedian(np.where(bad, np.nan, F), axis=0), np.nanmedian(np.where(bad, np.nan, S), axis=0)
+                allbad = bad.all(axis=0)
+                return np.where(allbad, UNRELIABLE_FILL, mf), np.where(allbad, UNRELIABLE_STRENGTH, ms)
 
             def nanmed(f):    # disc darkness (relative rule): NaN = unknowable bubble; a frame without it does not vote; None when no frame has it
                 have = [getattr(x, f) for x in fr if getattr(x, f) is not None]
@@ -93,10 +104,13 @@ class Track:
                     warnings.simplefilter("ignore", RuntimeWarning)
                     return np.nanmedian(np.stack(have), axis=0)
 
+            FA, SA = med_fs("FA", "SA")
+            FI, SI = med_fs("FI", "SI")
             subj = {}
             if r0.FS is not None:    # same form on every frame of a track (form_key), so FS is present on all or none
-                subj = dict(FS=med("FS"), SS=med("SS"), MS=nanmed("MS"))
-            self._raw = PageRaw(r0.numbers, r0.labels, r0.digit_index, med("FA"), med("SA"), med("FI"), med("SI"),
+                FS, SS = med_fs("FS", "SS")
+                subj = dict(FS=FS, SS=SS, MS=nanmed("MS"))
+            self._raw = PageRaw(r0.numbers, r0.labels, r0.digit_index, FA, SA, FI, SI,
                                 float(np.median([x.ink for x in fr])), float(np.median([x.min_strength for x in fr])), True,
                                 ink_source="default" if any(x.ink_source == "default" for x in fr) else "auto",
                                 ink_separation=float(np.median([x.ink_separation for x in fr])),

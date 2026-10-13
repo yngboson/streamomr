@@ -272,3 +272,47 @@ def test_subject_filter(world):
     # an unreadable subject is NOT filtered out: it may be the wanted one
     U = light_subject(A, [0])
     assert len(commits(run(StreamSession(allowed_subjects={"zz"}), [U] * 4 + [world["E"]] * 3))) == 1
+
+
+# ---------------------------------------------------------------------------- unreliable (sentinel) bubbles in fusion
+def _sentinel_track(frames):
+    """Track over fake frames; each frame = (FA row of Q1) with the UNRELIABLE sentinel where given as None."""
+    from types import SimpleNamespace
+    from omr.fusion import Track
+    from omr.recognize import PageRaw, UNRELIABLE_FILL, UNRELIABLE_STRENGTH
+
+    def mk(fa):
+        F = np.zeros((1, 5))
+        S = np.full((1, 5), 1.0)
+        for i, v in enumerate(fa):
+            if v is None:
+                F[0, i], S[0, i] = UNRELIABLE_FILL, UNRELIABLE_STRENGTH
+            else:
+                F[0, i] = v
+        r = PageRaw([1], [list("ABCDE")], [0], F, S, np.zeros((1, 10)), np.ones((1, 10)), 0.5, 0.6)
+        return SimpleNamespace(raw=r, form_key="f", page=0, serial=None, homography=None, quality={})
+    rs = [mk(f) for f in frames]
+    t = Track(1, rs[0], 0.0)
+    for i, r in enumerate(rs[1:], 1):
+        t.add(r, i * DT, None)
+    return t
+
+
+def test_unreliable_bubble_samples_do_not_vote_in_fusion():
+    # the real scan: the marked bubble (C) is measured once and unknowable in the other frames; the rest too
+    u = None
+    t = _sentinel_track([[u, u, 1.0, u, 0.02], [0.0, 0.01, u, u, u], [u, 0.02, u, 0.0, u]])
+    fa = t.fused_raw().FA[0]
+    assert fa[2] == 1.0 and fa[0] == 0.0 and abs(fa[1] - 0.015) < 1e-9 and fa[3] == 0.0 and fa[4] == 0.02    # no 0.5 contamination
+    a = t.decisions().answers[0]
+    assert a.state == "single" and a.marked == [2] and not a.ambiguous
+
+
+def test_bubble_unreliable_in_every_frame_stays_unreliable_and_is_never_picked():
+    from omr.recognize import UNRELIABLE_FILL, UNRELIABLE_STRENGTH
+    u = None
+    t = _sentinel_track([[u, u, u, u, u], [u, u, u, u, u]])
+    raw = t.fused_raw()
+    assert (raw.FA == UNRELIABLE_FILL).all() and (raw.SA == UNRELIABLE_STRENGTH).all()
+    a = t.decisions().answers[0]
+    assert a.ambiguous and a.guess is None and a.marked == []       # five equal unknowable greys: no pick by index
