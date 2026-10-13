@@ -351,6 +351,25 @@ def _box_mean(ii, x0, y0, x1, y1) -> float:
     return float((ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]) / ((x1 - x0) * (y1 - y0)))
 
 
+def _box_means(ii, x0, y0, x1, y1) -> np.ndarray:
+    """`_box_mean` over arrays of boxes at once (same clipping / rounding, so the same numbers)."""
+    H, W = ii.shape[0] - 1, ii.shape[1] - 1
+    x0 = np.minimum(np.maximum(np.rint(x0), 0), W - 1).astype(np.intp)
+    x1 = np.minimum(np.maximum(np.rint(x1), 1), W).astype(np.intp)
+    y0 = np.minimum(np.maximum(np.rint(y0), 0), H - 1).astype(np.intp)
+    y1 = np.minimum(np.maximum(np.rint(y1), 1), H).astype(np.intp)
+    x1, y1 = np.maximum(x1, x0 + 1), np.maximum(y1, y0 + 1)
+    return (ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]) / ((x1 - x0) * (y1 - y0))
+
+
+def _band_scores(ii, ppm, xs0, xs1, y, h, dys) -> np.ndarray:
+    """bright band - dark band - bright band score of a header row segment at every vertical offset of `dys`."""
+    inside = _box_means(ii, xs0 * ppm, (y + dys + 0.15 * h) * ppm, xs1 * ppm, (y + dys + 0.85 * h) * ppm)
+    above = _box_means(ii, xs0 * ppm, (y + dys - 0.2 - HEADER_BAND_MM) * ppm, xs1 * ppm, (y + dys - 0.2) * ppm)
+    below = _box_means(ii, xs0 * ppm, (y + dys + h + 0.2) * ppm, xs1 * ppm, (y + dys + h + 0.2 + HEADER_BAND_MM) * ppm)
+    return np.minimum(above, below) - inside
+
+
 def _register_row(ii, ppm, row, guard, side, search=(HEADER_SEARCH_MM, HEADER_SEARCH_MM), dy_fixed=None):
     """(dx, dy) in mm that put the nominal header row on the printed one, at one end of the row.
 
@@ -363,28 +382,33 @@ def _register_row(ii, ppm, row, guard, side, search=(HEADER_SEARCH_MM, HEADER_SE
     xs1 = row[n_end - 1][0] + w if side == "L" else row[-1][0] + w
     step = 1.0 / ppm
     best = (-1e9, 0.0)
-    for dy in ([] if dy_fixed is not None else np.arange(-search[1], search[1] + 1e-9, step)):
-        inside = _box_mean(ii, xs0 * ppm, (y + dy + 0.15 * h) * ppm, xs1 * ppm, (y + dy + 0.85 * h) * ppm)
-        above = _box_mean(ii, xs0 * ppm, (y + dy - 0.2 - HEADER_BAND_MM) * ppm, xs1 * ppm, (y + dy - 0.2) * ppm)
-        below = _box_mean(ii, xs0 * ppm, (y + dy + h + 0.2) * ppm, xs1 * ppm, (y + dy + h + 0.2 + HEADER_BAND_MM) * ppm)
-        score = min(above, below) - inside       # bright bands around a dark band
-        if score > best[0]:
-            best = (score, float(dy))
+    if dy_fixed is None:
+        dys = np.arange(-search[1], search[1] + 1e-9, step)
+        if len(dys):
+            sc = _band_scores(ii, ppm, xs0, xs1, y, h, dys)
+            k = int(np.argmax(sc))
+            if sc[k] > best[0]:
+                best = (float(sc[k]), float(dys[k]))
     dy = best[1] if dy_fixed is None else dy_fixed
     # horizontal: guard cells + one white cell beyond the end, as a +1 (black) / -1 (white) template
     pat = ([False] + list(guard)) if side == "L" else (list(guard) + [False])
     x_first = (row[0][0] - w) if side == "L" else row[-len(guard)][0]
     best = (-1e9, 0.0)
-    for dx in np.arange(-search[0], search[0] + 1e-9, step):
-        vals = np.array([_box_mean(ii, (x_first + dx + (i + 0.25) * w) * ppm, (y + dy + 0.2 * h) * ppm,
-                                   (x_first + dx + (i + 0.75) * w) * ppm, (y + dy + 0.8 * h) * ppm) for i in range(len(pat))])
+    dxs = np.arange(-search[0], search[0] + 1e-9, step)
+    if len(dxs):
+        base = (x_first + dxs)[:, None]
+        i_ = np.arange(len(pat))[None, :]
+        vals = _box_means(ii, (base + (i_ + 0.25) * w) * ppm, (y + dy + 0.2 * h) * ppm,
+                          (base + (i_ + 0.75) * w) * ppm, (y + dy + 0.8 * h) * ppm)           # (ndx, ncell)
         sign = np.where(pat, -1.0, 1.0)          # bright where white, dark where black
-        score = float((sign * (vals - vals.mean())).sum())
-        if score > best[0]:
-            best = (score, float(dx))
+        sc = (sign[None, :] * (vals - vals.mean(axis=1, keepdims=True))).sum(axis=1)
+        k = int(np.argmax(sc))
+        if sc[k] > best[0]:
+            best = (float(sc[k]), float(dxs[k]))
     return best[1], dy
 
 
+HEADER_REACH_MM = 40.0       # nothing of the header read touches the canvas further than this below the flat-field band
 HEADER_FLAT_MARGIN_MM = 4.0  # paper sampled this far above / below the header rows for the flat field
 HEADER_FLAT_PCT = 85         # printed black covers < 50 % of any column of that window, so this percentile is paper
 HEADER_FLAT_SIGMA_MM = 1.2   # smoothing of the per-column paper level along the row
@@ -400,7 +424,8 @@ def _flatten_header(warped: np.ndarray, ppm: float) -> np.ndarray:
     rows = lay.header_cell_rects()
     y0 = max(int(round((rows[0][0][1] - HEADER_FLAT_MARGIN_MM) * ppm)), 0)
     y1 = min(int(round((rows[-1][0][1] + rows[-1][0][3] + HEADER_FLAT_MARGIN_MM) * ppm)), warped.shape[0])
-    out = warped.astype(np.float32)
+    # rows far below the header are never read (registration reaches < 25 mm from a row): neither converted nor integrated
+    out = warped[:min(y1 + int(round(HEADER_REACH_MM * ppm)), warped.shape[0])].astype(np.float32)
     band = out[y0:y1]
     paper = np.percentile(band, HEADER_FLAT_PCT, axis=0).astype(np.float32)
     paper = cv2.GaussianBlur(paper.reshape(1, -1), (0, 0), HEADER_FLAT_SIGMA_MM * ppm).reshape(-1)
@@ -425,13 +450,12 @@ def _track_dy(ii, ppm, row, first_search: float):
         xs0, xs1 = row[i0][0], row[i0 + TRACK_SEG - 1][0] + w
         half = first_search if k == 0 else TRACK_STEP_MM
         best = (-1e9, prev)
-        for dy in np.arange(prev - half, prev + half + 1e-9, step):
-            inside = _box_mean(ii, xs0 * ppm, (y + dy + 0.15 * h) * ppm, xs1 * ppm, (y + dy + 0.85 * h) * ppm)
-            above = _box_mean(ii, xs0 * ppm, (y + dy - 0.2 - HEADER_BAND_MM) * ppm, xs1 * ppm, (y + dy - 0.2) * ppm)
-            below = _box_mean(ii, xs0 * ppm, (y + dy + h + 0.2) * ppm, xs1 * ppm, (y + dy + h + 0.2 + HEADER_BAND_MM) * ppm)
-            score = min(above, below) - inside
-            if score > best[0]:
-                best = (score, float(dy))
+        dys_ = np.arange(prev - half, prev + half + 1e-9, step)
+        if len(dys_):
+            sc = _band_scores(ii, ppm, xs0, xs1, y, h, dys_)
+            k = int(np.argmax(sc))
+            if sc[k] > best[0]:
+                best = (float(sc[k]), float(dys_[k]))
         if best[0] >= TRACK_MIN_CONTRAST:
             prev = best[1]
         centres.append(i0 + (TRACK_SEG - 1) / 2.0)
@@ -481,24 +505,24 @@ def _read_header_pass(flat: np.ndarray, ii: np.ndarray, ppm: float, search, disa
         if abs(dxr - dxl) > disagree[0] or abs(dyr - dyl) > disagree[1]:     # the two ends disagree beyond any plausible bow
             info["header_reg_mm"] = float(max(abs(dxr - dxl), abs(dyr - dyl)))
             return None, info
-        d = np.empty(n)
-        for i, (x, y, w, h) in enumerate(row):
-            t = i / (n - 1)
-            dx, dy = dxl + (dxr - dxl) * t, (dyl + (dyr - dyl) * t if dys is None else float(dys[i]))
-            cell = _box_mean(ii, (x + dx + 0.25 * w) * ppm, (y + dy + 0.2 * h) * ppm, (x + dx + 0.75 * w) * ppm,
-                             (y + dy + 0.8 * h) * ppm)
-            up = _box_mean(ii, (x + dx + 0.1 * w) * ppm, (y + dy - 0.25 - HEADER_BAND_MM) * ppm, (x + dx + 0.9 * w) * ppm,
-                           (y + dy - 0.25) * ppm)
-            dn = _box_mean(ii, (x + dx + 0.1 * w) * ppm, (y + dy + h + 0.25) * ppm, (x + dx + 0.9 * w) * ppm,
-                           (y + dy + h + 0.25 + HEADER_BAND_MM) * ppm)
-            paper = max(0.5 * (up + dn), 1.0)
-            d[i] = 1.0 - cell / paper
-            if i in black_guard:   # printed black: darker quartile of the cell's pixels (robust to white toner streaks)
-                y0_, x0_ = int(round((y + dy + 0.2 * h) * ppm)), int(round((x + dx + 0.2 * w) * ppm))
-                c = flat[max(y0_, 0):max(int(round((y + dy + 0.8 * h) * ppm)), y0_ + 1),
-                         max(x0_, 0):max(int(round((x + dx + 0.8 * w) * ppm)), x0_ + 1)]
-                if c.size:
-                    blacks.append(1.0 - float(np.percentile(c, BLACK_PERCENTILE)) / paper)
+        cx, cy, cw_, ch_ = (np.array([c[k] for c in row]) for k in range(4))
+        t = np.arange(n) / (n - 1)
+        dx, dy = dxl + (dxr - dxl) * t, (dyl + (dyr - dyl) * t if dys is None else np.asarray(dys, float))
+        cell = _box_means(ii, (cx + dx + 0.25 * cw_) * ppm, (cy + dy + 0.2 * ch_) * ppm, (cx + dx + 0.75 * cw_) * ppm,
+                          (cy + dy + 0.8 * ch_) * ppm)
+        up = _box_means(ii, (cx + dx + 0.1 * cw_) * ppm, (cy + dy - 0.25 - HEADER_BAND_MM) * ppm, (cx + dx + 0.9 * cw_) * ppm,
+                        (cy + dy - 0.25) * ppm)
+        dn = _box_means(ii, (cx + dx + 0.1 * cw_) * ppm, (cy + dy + ch_ + 0.25) * ppm, (cx + dx + 0.9 * cw_) * ppm,
+                        (cy + dy + ch_ + 0.25 + HEADER_BAND_MM) * ppm)
+        paper = np.maximum(0.5 * (up + dn), 1.0)
+        d = 1.0 - cell / paper
+        for i in sorted(black_guard):   # printed black: darker quartile of the cell's pixels (robust to white toner streaks)
+            x, y, w, h = row[i]
+            y0_, x0_ = int(round((y + dy[i] + 0.2 * h) * ppm)), int(round((x + dx[i] + 0.2 * w) * ppm))
+            c = flat[max(y0_, 0):max(int(round((y + dy[i] + 0.8 * h) * ppm)), y0_ + 1),
+                     max(x0_, 0):max(int(round((x + dx[i] + 0.8 * w) * ppm)), x0_ + 1)]
+            if c.size:
+                blacks.append(1.0 - float(np.percentile(c, BLACK_PERCENTILE)) / paper[i])
         sb = [i for i, b in enumerate(mk.HEADER_START_GUARD) if b]
         sw = [i for i, b in enumerate(mk.HEADER_START_GUARD) if not b]
         eb = [n - g1 + i for i, b in enumerate(mk.HEADER_STOP_GUARD) if b]
