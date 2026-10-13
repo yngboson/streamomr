@@ -623,7 +623,7 @@ function sendFrame() {
 function showErr(e) { if (DEV) devLog('ERROR', 'camera: ' + (e && e.message || e)); $('hint').textContent = '카메라 오류: ' + (e && e.message || e) + (location.protocol === 'http:' && location.hostname !== 'localhost' ? ' (휴대폰은 https 필요)' : ''); }
 
 $('start').onclick = async () => {
-  if (running) { if (DEV) devLog('SESSION', 'stop'); running = false; if (stream) stream.getTracks().forEach(t => t.stop()); $('start').textContent = '시작'; return; }
+  if (running) { if (DEV) { devLog('SESSION', 'stop'); devOnStop(); } running = false; if (stream) stream.getTracks().forEach(t => t.stop()); $('start').textContent = '시작'; return; }
   try {
     audio = audio || new (window.AudioContext || window.webkitAudioContext)(); if (audio.state === 'suspended') await audio.resume();
     await openCamera(); running = true; busy = false; $('start').textContent = '중지';
