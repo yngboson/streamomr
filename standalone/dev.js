@@ -7,6 +7,15 @@ const DEV_FAIL = new Set(['partial', 'bad_geometry', 'bad_meta', 'inconsistent',
 const DEV_MAX_FAIL = 60, DEV_FAIL_GAP_MS = 1500, DEV_MAX_LINES = 50000;
 const devT0 = Date.now(), devLines = [], devScans = [], devFails = [], devFrames = [];
 const DEV_MAX_FRAMES = 30000;
+// per-frame cost split (frames.csv, last 11 columns): grab = drawImage+getImageData on the main thread; frame_age = how long the
+// frame waited after its grab (prefetch); xfer = postMessage main->worker; py_convert = RGBA copy + gray; py_feed = session.feed;
+// py_other = worker_ms - convert - recognize - feed (JS->Py call, _clean, json.dumps, commit detail JPEG); post = worker->main;
+// parse = JSON.parse; gap = result received -> next frame sent (worker idle time).  total_ms of the old columns = python only.
+function devTimingCols(e, tm) {
+  const s = devSent || {}, ms = e.ms || {}, t = (tm && tm.m && tm.m.t) || {}, r1 = v => v == null || isNaN(v) ? '' : Math.round(v * 10) / 10;
+  const other = t.worker != null ? t.worker - (ms.convert || 0) - (ms.recognize || 0) - (ms.feed || 0) : null;
+  return [r1(s.grabMs), r1(s.age), r1(t.xfer), r1(ms.convert), r1(ms.feed), r1(other), r1(t.worker), r1(tm && t.tx != null ? tm.recvAt - t.tx : null), r1(tm && tm.parseMs), r1(s.gap), s.prefetched ? 1 : 0];
+}
 const devStat = { frames: 0, recMs: 0, status: {}, lastReport: performance.now() };
 let devPrevState = null, devPrevStatus = null, devPrevMissed = '', devLastFail = 0, devBuild = new Date().toISOString();
 document.title += ' [DEV]';
@@ -19,7 +28,7 @@ function devLog(kind, text) {
   devRefresh();
 }
 // JPEG of the frame that was just sent to the worker (the one-frame-in-flight loop leaves it in `grab` until the next send)
-const devFrame = () => new Promise(res => { try { grab.toBlob(b => res(b), 'image/jpeg', 0.85); } catch (err) { res(null); } });
+const devFrame = () => new Promise(res => { try { flightCanvas.toBlob(b => res(b), 'image/jpeg', 0.85); } catch (err) { res(null); } });
 const devBlob = (cv, q = 0.9) => new Promise(res => cv.toBlob(res, 'image/jpeg', q));
 const devQ = q => Object.entries(q || {}).map(([k, v]) => `${k}=${typeof v === 'number' ? +v.toFixed(3) : v}`).join(' ');
 
@@ -71,11 +80,12 @@ async function devVideoStop() {
   if (rec && rec.state !== 'inactive') { rec.stop(); await devVideos[devVideos.length - 1].done; }
 }
 
-function devOnResult(e) {
+function devOnResult(e, tm) {
   const d = e.dev || {}, now = performance.now();
   devStat.frames++; devStat.recMs += (e.ms && e.ms.recognize) || 0;
   if (devFrames.length < DEV_MAX_FRAMES) devFrames.push([new Date().toISOString(), ((Date.now() - devT0) / 1000).toFixed(2), e.status || (e.error ? 'error' : ''), e.state, (e.ms && e.ms.recognize) ?? '', (e.ms && e.ms.total) ?? '', `${e.w || ''}x${e.h || ''}`,
-    ((e.dev || {}).markers || []).join(' '), ((e.dev || {}).missing || []).join(' '), ((e.dev || {}).flags || []).join(';'), e.commit ? 'commit' : '', JSON.stringify((e.dev || {}).quality || {})]);
+    ((e.dev || {}).markers || []).join(' '), ((e.dev || {}).missing || []).join(' '), ((e.dev || {}).flags || []).join(';'), e.commit ? 'commit' : '', JSON.stringify((e.dev || {}).quality || {}),
+    ...devTimingCols(e, tm)]);
   const status = e.status || (e.error ? 'error' : '?');
   devStat.status[status] = (devStat.status[status] || 0) + 1;
   if (e.state !== devPrevState) { devLog('STATE', `${devPrevState ?? '-'} -> ${e.state}  ${e.hint || ''}`); devPrevState = e.state; }
@@ -254,7 +264,7 @@ async function devExport() {
       pyodide: PYODIDE_BASE, scans: devScans.length, doubtful_scans: devScans.filter(r => r.doubts.length).length, failure_frames: devFails.length, frame_rows: devFrames.length, log_lines: devLines.length };
     files.unshift({ name: 'README.txt', data: devText(DEV_README) }, { name: 'session.json', data: devText(JSON.stringify(session, null, 1)) },
                   { name: 'log.txt', data: devText(devLines.join('\n') + '\n') }, { name: 'scans.csv', data: devText(devCsv(idx)) }, { name: 'failures.csv', data: devText(devCsv(fr)) },
-                  { name: 'frames.csv', data: devText(devCsv([['time', 't_s', 'status', 'state', 'recognize_ms', 'total_ms', 'frame', 'markers', 'missing_corners', 'flags', 'event', 'quality'], ...devFrames])) });
+                  { name: 'frames.csv', data: devText(devCsv([['time', 't_s', 'status', 'state', 'recognize_ms', 'total_ms', 'frame', 'markers', 'missing_corners', 'flags', 'event', 'quality', 'grab_ms', 'frame_age_ms', 'xfer_ms', 'py_convert_ms', 'py_feed_ms', 'py_other_ms', 'worker_ms', 'post_ms', 'parse_ms', 'gap_ms', 'prefetched'], ...devFrames])) });
     const a = document.createElement('a'); a.href = URL.createObjectURL(devZip(files));
     a.download = 'streamomr-dev_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.zip';
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);

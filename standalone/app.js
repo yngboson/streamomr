@@ -465,13 +465,13 @@ function startWorker() {
     if (m.type === 'progress') { $('loadmsg').textContent = m.text; }
     else if (m.type === 'ready') { ready = true; $('loading').hidden = true; $('start').disabled = false; $('hint').textContent = '시작을 누르세요'; }
     else if (m.type === 'error') { if (DEV) devLog('ERROR', 'worker: ' + m.text); $('loadtitle').textContent = '불러오기 실패'; $('loadmsg').textContent = m.text; $('hint').textContent = '불러오기 실패: ' + m.text; }
-    else if (m.type === 'result') onResult(JSON.parse(m.json), m.ms);
+    else if (m.type === 'result') { const tr = performance.timeOrigin + performance.now(), p0 = performance.now(), e = JSON.parse(m.json); onResult(e, m.ms, { recvAt: tr, parseMs: performance.now() - p0, m }); }
   };
   worker.postMessage({ type: 'init', sources: JSON.parse($('omr-src').textContent), pyodideBase: PYODIDE_BASE });
 }
-function onResult(e, wms) {
-  if (DEV) devOnResult(e);
-  rtt = performance.now() - lastSend; busy = false; frames++;
+function onResult(e, wms, tm) {
+  if (DEV) devOnResult(e, tm);
+  lastResultAt = performance.now(); rtt = lastResultAt - lastSend; emaRtt = 0.7 * emaRtt + 0.3 * rtt; busy = false; frames++;
   lastOv = e.overlay; lastState = e.state;
   $('state').textContent = e.state; $('state').className = 'state ' + e.state;
   $('hint').textContent = e.error || e.hint || '';
@@ -525,6 +525,34 @@ function applyRevision(s, rv) {
   if (s.detail && s.detail.img) fixButton(sev, () => showDetail(s, s.detail));
   return s;
 }
+// Pipeline: one frame is in flight in the worker (busy); while it computes (200-400 ms) the main thread is idle, so the
+// NEXT frame is grabbed (drawImage + getImageData, ~20-40 ms on a phone) just before the result is due and sent the moment
+// the result arrives -> the grab no longer sits between two recognitions.  Latest-frame-wins: a prefetched frame older
+// than PREFETCH_MAX_AGE is dropped and grabbed again, nothing is ever queued.
+const PREFETCH_MAX_AGE = 160;   // ms
+let pending = null, prefetchTimer = 0, emaRtt = 400, emaGrab = 30, grabSwap = 0, lastResultAt = 0;
+const grab2 = DEV ? document.createElement('canvas') : null, gctx2 = DEV ? grab2.getContext('2d', { willReadFrequently: true }) : null;
+let flightCanvas = grab;   // dev: the canvas holding the frame that is in the worker (failure snapshots)
+function grabFrame() {
+  // Never process a frame before the real size is known (a 0x0 canvas gives Safari a blank/1x1 image).
+  // Frames are used exactly as the camera delivers them: never mirrored (any selfie flip is CSS-only).
+  const st = track && track.getSettings ? track.getSettings() : {};
+  const w = video.videoWidth || st.width || 0, h = video.videoHeight || st.height || 0;
+  if (!w || !h) return null;
+  const t0 = performance.now();
+  const cv = DEV && (grabSwap ^= 1) ? grab2 : grab, cx = cv === grab ? gctx : gctx2;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }   // resizing reallocates the 8 MB backing store: only on change
+  cx.drawImage(video, 0, 0, w, h);
+  const data = cx.getImageData(0, 0, w, h).data;      // RGBA
+  const t1 = performance.now();
+  emaGrab = 0.7 * emaGrab + 0.3 * (t1 - t0);
+  return { buf: data.buffer, w, h, t: t1, grabMs: t1 - t0, cv };
+}
+function prefetch() {
+  prefetchTimer = 0;
+  if (!running || !busy || pending) return;
+  pending = grabFrame();
+}
 function pump() {
   if (!running || busy) return;
   const wait = Math.max(0, 1000 / TARGET_FPS - (performance.now() - lastSend));
@@ -532,26 +560,32 @@ function pump() {
   setTimeout(sendFrame, wait);
 }
 function sendFrame() {
-  if (!running) { busy = false; return; }
-  // Never process a frame before the real size is known (a 0x0 canvas gives Safari a blank/1x1 image).
-  // Frames are used exactly as the camera delivers them: never mirrored (any selfie flip is CSS-only).
-  const st = track && track.getSettings ? track.getSettings() : {};
-  const w = video.videoWidth || st.width || 0, h = video.videoHeight || st.height || 0;
-  if (!w || !h) { setTimeout(sendFrame, 100); return; }   // stay busy and retry
-  grab.width = w; grab.height = h;
-  gctx.drawImage(video, 0, 0, w, h);
-  const data = gctx.getImageData(0, 0, w, h).data;      // RGBA
-  sentDims = `${w}x${h}`;
-  lastSend = performance.now();
-  worker.postMessage({ type: 'frame', id: ++frameId, buf: data.buffer, w, h }, [data.buffer]);
+  if (!running) { busy = false; pending = null; return; }
+  const now = performance.now();
+  let f = pending; pending = null;
+  if (f && now - f.t > PREFETCH_MAX_AGE) f = null;     // too old (result came late): grab a fresh one
+  const fresh = !f;
+  if (!f) f = grabFrame();
+  if (!f) { setTimeout(sendFrame, 100); return; }       // size unknown yet: stay busy and retry
+  const sent = performance.now();
+  sentDims = `${f.w}x${f.h}`;
+  flightCanvas = f.cv;
+  lastSend = sent;
+  const gap = lastResultAt ? sent - lastResultAt : 0;   // result -> next frame leaves the main thread (idle worker time)
+  worker.postMessage({ type: 'frame', id: ++frameId, buf: f.buf, w: f.w, h: f.h, tx: performance.timeOrigin + sent }, [f.buf]);
+  if (DEV) devSent = { grabMs: f.grabMs, age: sent - f.t, gap, prefetched: !fresh };
+  // schedule the next grab to finish about when the result is expected
+  clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(prefetch, Math.max(0, emaRtt - emaGrab - 25));
 }
+let devSent = null;
 function showErr(e) { if (DEV) devLog('ERROR', 'camera: ' + (e && e.message || e)); $('hint').textContent = '카메라 오류: ' + (e && e.message || e) + (location.protocol === 'http:' && location.hostname !== 'localhost' ? ' (휴대폰은 https 필요)' : ''); }
 
 $('start').onclick = async () => {
-  if (running) { if (DEV) { devLog('SESSION', 'stop'); devOnStop(); } running = false; if (stream) stream.getTracks().forEach(t => t.stop()); $('start').textContent = '시작'; return; }
+  if (running) { if (DEV) { devLog('SESSION', 'stop'); devOnStop(); } running = false; pending = null; clearTimeout(prefetchTimer); if (stream) stream.getTracks().forEach(t => t.stop()); $('start').textContent = '시작'; return; }
   try {
     audio = audio || new (window.AudioContext || window.webkitAudioContext)(); if (audio.state === 'suspended') await audio.resume();
-    await openCamera(); running = true; busy = false; $('start').textContent = '중지';
+    await openCamera(); running = true; busy = false; pending = null; lastResultAt = 0; $('start').textContent = '중지';
     worker.postMessage({ type: 'reset' });
     if (DEV) devOnStart();
     stage.classList.toggle('portrait', video.videoHeight > video.videoWidth);
