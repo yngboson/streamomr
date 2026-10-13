@@ -8,6 +8,7 @@ const TARGET_FPS = 8;
 let stream = null, track = null, audio = null, running = false, ready = false;
 let busy = false, lastOv = null, lastState = 'idle', lastSend = 0, torchOn = false, frameId = 0;
 let sentDims = '-', frames = 0, fpsT = performance.now(), fps = 0, rtt = 0;
+let lastScan = null;   // the scan committed last (a revision event refers to it)
 const scans = [];   // in-memory results of this page load
 
 // ---- commit feedback: ok = short high beep + green; minor (answer rows to check) = two mid tones + amber;
@@ -20,16 +21,21 @@ function tone(freq, at, dur, type, vol) {
   g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
   o.start(t); o.stop(t + dur + 0.02);
 }
-function feedback(sev) {
+// kind 'resolved': a committed doubtful sheet became confident on later frames (soft rising chime, green border);
+// kind 'contradiction': later frames contradict a row that was confident at commit (warning tone, amber border)
+function feedback(sev, kind) {
   sev = FB_MS[sev] ? sev : 'ok';
+  if (kind === 'resolved') sev = 'ok'; else if (kind === 'contradiction' && sev === 'ok') sev = 'minor';
   if (audio) {
-    if (sev === 'ok') tone(1040, 0, 0.18, 'sine', 0.2);
+    if (kind === 'resolved') { tone(784, 0, 0.12, 'sine', 0.1); tone(1175, 0.12, 0.22, 'sine', 0.1); }
+    else if (kind === 'contradiction') { tone(466, 0, 0.12, 'square', 0.1); tone(466, 0.2, 0.12, 'square', 0.1); }
+    else if (sev === 'ok') tone(1040, 0, 0.18, 'sine', 0.2);
     else if (sev === 'minor') { tone(740, 0, 0.13, 'triangle', 0.28); tone(587, 0.16, 0.16, 'triangle', 0.28); }
     else for (let k = 0; k < 3; k++) tone(294, k * 0.22, 0.16, 'square', 0.12);
   }
   stage.classList.remove('fb-ok', 'fb-minor', 'fb-severe'); void stage.offsetWidth; stage.classList.add('fb-' + sev);
   clearTimeout(fbTimer); fbTimer = setTimeout(() => stage.classList.remove('fb-' + sev), FB_MS[sev]);
-  if (navigator.vibrate) navigator.vibrate(sev === 'ok' ? 60 : sev === 'minor' ? [80, 60, 80] : [200, 80, 200, 80, 200]);
+  if (navigator.vibrate) navigator.vibrate(kind === 'resolved' ? 30 : sev === 'ok' ? 60 : sev === 'minor' ? [80, 60, 80] : [200, 80, 200, 80, 200]);
 }
 const SEV_TEXT = { minor: '확인할 문항 있음', severe: '학번/과목 인식 실패' };
 function fixButton(sev, open) {   // banner button after a non-ok commit: opens the detail with 정정 buttons
@@ -63,6 +69,14 @@ function renderScan(s, detail) {
 }
 // a person's correction from the detail view: update this result in memory (list, CSV) right away
 const ID_FLAGS = { id: ['id_unreadable', 'id_guessed', 'id_blank'], subject: ['subject_unreadable', 'subject_guessed', 'subject_blank'] };
+function recount(s, d) {   // counts + severity of a result after a human fix / a revision
+  s.n_doubtful = s.answers.filter(a => a.doubt).length;
+  s.n_multi = s.answers.filter(a => a.state === 'multi').length;
+  s.n_blank = s.answers.filter(a => a.state === 'blank').length;
+  const idBad = s.flags.some(f => ID_FLAGS.id.includes(f) || ID_FLAGS.subject.includes(f)) || (d.id && d.id.length && !s.student_id);
+  s.severity = idBad ? 'severe' : (s.n_doubtful || s.n_multi) ? 'minor' : 'ok';
+  s.needs_review = s.severity !== 'ok';
+}
 function applyFix(s, d, fix) {
   s.fixed = s.fixed || [];
   if (fix.kind === 'q') {
@@ -79,12 +93,7 @@ function applyFix(s, d, fix) {
       s.flags = s.flags.filter(f => !ID_FLAGS[fix.kind].includes(f));
     }
   }
-  s.n_doubtful = s.answers.filter(a => a.doubt).length;
-  s.n_multi = s.answers.filter(a => a.state === 'multi').length;
-  s.n_blank = s.answers.filter(a => a.state === 'blank').length;
-  const idBad = s.flags.some(f => ID_FLAGS.id.includes(f) || ID_FLAGS.subject.includes(f)) || (d.id && d.id.length && !s.student_id);
-  s.severity = idBad ? 'severe' : (s.n_doubtful || s.n_multi) ? 'minor' : 'ok';
-  s.needs_review = s.severity !== 'ok';
+  recount(s, d);
   renderScan(s, d);
   if (scans[scans.length - 1] === s) $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}` + (s.severity === 'ok' ? ' · 정정 완료' : '');
   return {};
@@ -96,7 +105,7 @@ $('csv').onclick = () => {
   for (let q = 1; q <= nq; q++) head.push('q' + q);
   const rows = [head].concat(scans.map(s => {
     const byQ = {}; s.answers.forEach(a => { byQ[a.q] = a.marked; });
-    const r = [s.time, s.subject, s.student_id, s.page + 1, s.total_pages, s.serial, s.form_key, s.n_questions, s.n_blank, s.n_multi, s.n_doubtful, s.needs_review, s.flags.concat(s.fixed && s.fixed.length ? ['fixed:' + s.fixed.join(',')] : []).join(';')];
+    const r = [s.time, s.subject, s.student_id, s.page + 1, s.total_pages, s.serial, s.form_key, s.n_questions, s.n_blank, s.n_multi, s.n_doubtful, s.needs_review, s.flags.concat(s.fixed && s.fixed.length ? ['fixed:' + s.fixed.join(',')] : [], s.revised && s.revised.length ? ['revised:' + s.revised.join(',')] : []).join(';')];
     for (let q = 1; q <= nq; q++) r.push(byQ[q] ?? '');
     return r;
   }));
@@ -472,15 +481,49 @@ function onResult(e, wms) {
   if (e.commit) {
     const s = e.commit.summary; s.time = new Date().toISOString();
     const sev = s.severity || 'ok';
-    feedback(sev); addScan(s, e.commit.detail);
+    feedback(sev); addScan(s, e.commit.detail); s.detail = e.commit.detail; lastScan = s;
     if (DEV) devOnCommit(s, e.commit);
     $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}`;
     if (e.commit.detail && e.commit.detail.img) fixButton(sev, () => showDetail(s, e.commit.detail));
+  }
+  if (e.revision && lastScan) {
+    const s = applyRevision(lastScan, e.revision);
+    if (DEV) devOnRevision(s, e.revision);
   }
   const now = performance.now();
   if (now - fpsT > 1000) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; }
   $('stats').textContent = `${fps.toFixed(1)} fps - 프레임당 ${rtt.toFixed(0)} ms (인식 ${e.ms ? e.ms.recognize : '?'} ms) - 카메라 ${video.videoWidth}x${video.videoHeight} - 처리 ${sentDims}`;
   pump();
+}
+// a REVISION: later frames of the sheet that was just committed made it better (or contradict a confident row).
+// Replaces that scan's in-memory result; rows the person already fixed (s.fixed) keep their value.
+const SEV_RANK = { ok: 0, minor: 1, severe: 2 };
+function applyRevision(s, rv) {
+  const old = { severity: s.severity || 'ok', detail: s.detail }, n = rv.summary, fx = new Set(s.fixed || []);
+  const keepId = fx.has('학번'), keepSubj = fx.has('과목');
+  const oldAns = new Map(s.answers.map(a => [String(a.q), a]));
+  const keep = { time: s.time, li: s.li, fixed: s.fixed, student_id: s.student_id, subject: s.subject, flags: s.flags, revised: s.revised };
+  Object.assign(s, n);
+  s.answers = n.answers.map(a => fx.has(String(a.q)) && oldAns.has(String(a.q)) ? oldAns.get(String(a.q)) : a);
+  s.time = keep.time; s.li = keep.li; s.fixed = keep.fixed;
+  if (keepId) s.student_id = keep.student_id;
+  if (keepSubj) s.subject = keep.subject;
+  s.revised = (keep.revised || []).concat(rv.changed.filter(x => !(keep.revised || []).includes(x)));
+  s.contradiction = rv.contradiction || [];
+  const d = rv.detail;
+  if (d && d.img && old.detail && fx.size) {   // the person's fixes stay visible in the detail view
+    d.answers.forEach((r, i) => { const o = old.detail.answers[i]; if (o && fx.has(String(r.q))) d.answers[i] = o; });
+    if (keepId) d.id = old.detail.id; if (keepSubj) d.subject = old.detail.subject;
+  }
+  s.detail = d && d.img ? d : old.detail;
+  if (fx.size) { s.flags = n.flags.filter(f => !(keepId && ID_FLAGS.id.includes(f)) && !(keepSubj && ID_FLAGS.subject.includes(f))); recount(s, s.detail); }
+  renderScan(s, s.detail);
+  const sev = s.severity || 'ok', contra = (rv.contradiction || []).length > 0;
+  $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}` + (contra ? ' · 재확인 필요' : sev === 'ok' ? ' · 확인됨' : '');
+  if (contra) feedback('minor', 'contradiction');
+  else if (SEV_RANK[sev] < SEV_RANK[old.severity]) feedback(sev, 'resolved');
+  if (s.detail && s.detail.img) fixButton(sev, () => showDetail(s, s.detail));
+  return s;
 }
 function pump() {
   if (!running || busy) return;

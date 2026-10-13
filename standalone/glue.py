@@ -182,14 +182,18 @@ class Scanner:
         ev = session.feed(res, time.monotonic(), payload=None)
         ev["status"] = res.status
         ev["w"], ev["h"] = int(img.shape[1]), int(img.shape[0])
-        commit = ev.pop("commit", None)
-        if commit is not None:
-            ev["commit"] = {"summary": summarize(commit["result"]), "frames": commit["frames"], "detail": detail(commit["result"])}
+        for name in ("commit", "revision"):      # a revision = a better reading of the sheet committed before (omr/revision.py)
+            c = ev.pop(name, None)
+            if c is None:
+                continue
+            ev[name] = {"summary": summarize(c["result"]), "frames": c["frames"], "detail": detail(c["result"])}
+            if name == "revision":
+                ev[name].update(changed=c["changed"], contradiction=c["contradiction"], prev_severity=c["prev_severity"], n=c["revision"])
             if DEV:
-                cr = commit["result"]
-                ev["commit"]["dev"] = {"quality": _plain(cr.quality), "calibration": _plain(cr.calibration), "fused_frames": cr.fused_frames,
-                                       "frame_index": commit.get("frame_index"), "marker_ids": list(cr.marker_ids), "missing_corners": list(cr.missing_corners),
-                                       "trace": explain(cr)}
+                cr = c["result"]
+                ev[name]["dev"] = {"quality": _plain(cr.quality), "calibration": _plain(cr.calibration), "fused_frames": cr.fused_frames,
+                                   "frame_index": c.get("frame_index"), "marker_ids": list(cr.marker_ids), "missing_corners": list(cr.missing_corners),
+                                   "trace": explain(cr)}
         if DEV:
             ev["dev"] = {"quality": _plain(res.quality), "flags": list(res.flags), "markers": list(res.marker_ids),
                          "missing": list(res.missing_corners), "form_key": res.form_key, "page": res.page,

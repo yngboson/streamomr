@@ -466,6 +466,21 @@ def create_app(data_dir: str = "data", workers: int = 2) -> FastAPI:
             if outcome.kind in ("unassigned", "rejected"):
                 summ["severity"] = "severe"
             ev["commit"] = {"outcome": outcome.to_dict(), "summary": summ, "frames": commit["frames"]}
+            session.server_scan = outcome.scan_id if outcome.kind != "rejected" else None
+        rev = ev.pop("revision", None)
+        if rev is not None:
+            # a better reading of the sheet committed earlier in this session: it replaces that scan (audit row kept)
+            r = rev["result"]
+            old = getattr(session, "server_scan", None)
+            imgs = {"original": rev["payload"]}
+            outcome = svc.supersede_scan(old, r, images=imgs) if old else svc.ingest(r, images=imgs, source="stream")
+            summ = summarize(r)
+            if outcome.kind in ("unassigned", "rejected"):
+                summ["severity"] = "severe"
+            if outcome.scan_id and outcome.kind != "rejected":
+                session.server_scan = outcome.scan_id
+            ev["revision"] = {"outcome": outcome.to_dict(), "summary": summ, "frames": rev["frames"], "changed": rev["changed"],
+                              "contradiction": rev["contradiction"], "prev_severity": rev["prev_severity"], "replaces": old}
         missed = session.missed()
         if missed:
             ev["missed"] = missed

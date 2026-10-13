@@ -157,6 +157,19 @@ function devOnCommit(s, commit) {
   }
 }
 
+// a revision (later frames of an already committed sheet improved / contradict it): logged and attached to that scan
+function devOnRevision(s, rv) {
+  const rec = devScans[devScans.length - 1];
+  if (!rec) return;
+  const entry = { time: new Date().toISOString(), n: rv.n, frames_fused: rv.frames, changed: rv.changed, contradiction: rv.contradiction, prev_severity: rv.prev_severity,
+    severity: rv.summary.severity, student_id: rv.summary.student_id, subject: rv.summary.subject, flags: rv.summary.flags, n_doubtful: rv.summary.n_doubtful };
+  (rec.revisions = rec.revisions || []).push(entry);
+  const tr = (rv.dev || {}).trace;
+  if (tr) rec.revTrace = tr;
+  rec.summaryRevised = rv.summary;
+  devLog('REVISION', `#${rec.n} ${rec.folder} r${rv.n} frames=${rv.frames} changed=[${rv.changed.join(',')}] contradiction=[${rv.contradiction.join(',')}] severity ${rv.prev_severity} -> ${rv.summary.severity} id=${rv.summary.student_id} subject=${rv.summary.subject} flags=[${rv.summary.flags.join(',')}]`);
+}
+
 // ---- zip (stored, no compression)
 const devCrcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 function devCrc32(u8) { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = devCrcT[(c ^ u8[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
@@ -196,7 +209,7 @@ async function devExport() {
     const wasRecording = !!devRec;
     if (wasRecording) await devVideoStop();   // close the running segment so it is complete in the zip
 
-    const files = [], idx = [['n', 'time', 'folder', 'student_id', 'subject', 'page', 'total_pages', 'needs_review', 'flags', 'n_doubtful_rows', 'n_blank', 'n_multi', 'doubt_items', 'frame', 'sheet', 'sheet_marked', 'trace', 'scan_json']];
+    const files = [], idx = [['n', 'time', 'folder', 'student_id', 'subject', 'page', 'total_pages', 'needs_review', 'flags', 'n_doubtful_rows', 'n_blank', 'n_multi', 'doubt_items', 'frame', 'sheet', 'sheet_marked', 'trace', 'scan_json', 'revisions', 'revised_rows', 'contradiction_rows', 'revised_student_id', 'revised_severity']];
     for (const rec of devScans) {
       const s = rec.summary, d = rec.detail, f = rec.folder, names = [];
       const put = (name, data) => { files.push({ name: `${f}/${name}`, data }); names.push(name); };
@@ -217,9 +230,11 @@ async function devExport() {
       put('trace.txt', devText(devTraceText(rec)));
       const doubts = rec.rows.map(({ g, r, ...x }) => ({ ...x, crop: `crops/${x.key}.jpg`, crop_raw: `crops/${x.key}_raw.jpg` }));
       put('scan.json', devText(JSON.stringify({ n: rec.n, folder: f, time: rec.time, summary: s, frames_fused: rec.frames, rows: doubts, thresholds: { t_lo: d.t_lo, t_hi: d.t_hi, id_t_lo: d.id_t_lo, id_t_hi: d.id_t_hi },
-        dev: rec.dev, files: names.filter(x => x !== 'scan.json'), detail: detailNoImg }, null, 1)));
+        dev: rec.dev, revisions: rec.revisions || [], summary_after_revisions: rec.summaryRevised || null, trace_after_revisions: rec.revTrace || null, files: names.filter(x => x !== 'scan.json'), detail: detailNoImg }, null, 1)));
       idx.push([rec.n, rec.time, f, s.student_id, s.subject, s.page + 1, s.total_pages, s.needs_review, s.flags.join(';'), rec.doubts.length, s.n_blank, s.n_multi,
-        rec.doubts.map(x => x.key + ':' + x.status).join(';'), names.includes('frame.jpg') ? `${f}/frame.jpg` : '', `${f}/sheet.jpg`, names.includes('sheet_marked.jpg') ? `${f}/sheet_marked.jpg` : '', `${f}/trace.txt`, `${f}/scan.json`]);
+        rec.doubts.map(x => x.key + ':' + x.status).join(';'), names.includes('frame.jpg') ? `${f}/frame.jpg` : '', `${f}/sheet.jpg`, names.includes('sheet_marked.jpg') ? `${f}/sheet_marked.jpg` : '', `${f}/trace.txt`, `${f}/scan.json`,
+        (rec.revisions || []).length, [...new Set((rec.revisions || []).flatMap(x => x.changed))].join(';'), [...new Set((rec.revisions || []).flatMap(x => x.contradiction))].join(';'),
+        rec.summaryRevised ? rec.summaryRevised.student_id : '', rec.summaryRevised ? rec.summaryRevised.severity : '']);
     }
     const fr = [['n', 'file', 'time', 'status', 'state', 'hint', 'frame_size', 'markers', 'missing_corners', 'flags', 'quality']];
     for (const x of devFails) {
@@ -255,13 +270,14 @@ log.txt          시간순 텍스트 로그. 줄 머리: 시각 +세션경과초
                  STATE 상태 전이 / STATUS 인식 상태(ok, partial, bad_meta ...)가 바뀔 때 마커·품질 수치 /
                  FAIL 시트가 보이는데 읽지 못한 프레임 저장 / COMMIT 스캔 확정 / TRACE 그 스캔의 페이지 단위 값(잉크, 임계값) /
                  ROW 모든 문항·학번·과목 자리마다 한 줄: 최종 판정, 선지별 마킹% / 강도(s) / 원 어두움(d) / 다른 선지 대비 초과(x) / 절대규칙 분류 /
-                 FILES 그 스캔의 파일 위치 / MISSED 놓친 시트 / STATS 5초마다 fps·인식 시간·상태 분포 / ERROR
+                 FILES 그 스캔의 파일 위치 / REVISION 확정 뒤 같은 시트의 다음 프레임들이 결과를 고침(바뀐 행, 모순 행, 심각도 변화 - 확정 줄 아래에 붙음) / MISSED 놓친 시트 / STATS 5초마다 fps·인식 시간·상태 분포 / ERROR
 session.json     브라우저, 기기, 카메라 설정, 집계
 scans.csv        스캔 목록 (n, 폴더, 수험번호, 과목, 플래그, 애매한 항목, 파일 경로) - log.txt의 #n 과 같은 번호
 frames.csv       처리한 모든 프레임 한 줄씩 (상태, 인식 시간, 마커 id, 가려진 모서리, 품질 수치) 최대 ${DEV_MAX_FRAMES}줄
 scans/NNN_<수험번호>/   (모든 스캔, 잘 읽힌 것도 동일하게 저장)
   trace.txt        사람이 읽는 판정 과정: 페이지 값(잉크, t_lo/t_hi, 신뢰 여부) + 모든 행의 선지별 값 (비교용)
-  scan.json        같은 내용을 기계가 읽는 형태 (dev.trace) + 요약 + 모든 행 목록 + 버블 좌표(mm)
+  scan.json        revisions[]: 확정 뒤 수정 기록(바뀐 행·모순 행·융합 프레임 수), summary_after_revisions: 마지막 수정 뒤 요약 (summary는 확정 당시 값)
+                 같은 내용을 기계가 읽는 형태 (dev.trace) + 요약 + 모든 행 목록 + 버블 좌표(mm)
   sheet.jpg        인식에 쓴 보정(정렬)된 시트 전체
   sheet_marked.jpg 링(초록=인식, 빨강=복수, 주황=애매/공란)과 문제 행 박스를 그린 시트
   frame.jpg        확정 순간의 카메라 프레임

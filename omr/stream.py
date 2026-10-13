@@ -46,6 +46,12 @@ Rules
     stays in view; it is committed unreadable only when the hold expires or the track ends (>= 2 non-contributing
     frames, a contradicting / different sheet, `finish()`).  The commit carries the fused decisions with the
     sharpest frame's images and `result.fused_frames`.
+  * Revision (omr/revision.py): frames of the SAME track keep fusing in cooldown.  While the committed result still has a
+    doubtful / guessed / unreadable row (at most REVISE_FRAMES frames / REVISE_SECONDS), a fused reading that makes such a
+    row confident emits event["revision"] (a commit-like payload + `changed` rows + `severity`/`prev_severity`).  UPGRADE-ONLY:
+    a row that was confident at commit is never changed; fused evidence that contradicts it is reported once as
+    `contradiction` rows (flag "contradiction", needs review) with the row left as committed.  A different sheet ends
+    the track as before.  Each revision becomes the new committed result.
   * The commit carries the sharpest of the K agreeing frames (result + the caller's payload).
     Fusing the K frames' scores into one result would go in `_pick`.
 """
@@ -54,7 +60,8 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .fusion import Track, trustworthy
-from .identity import sheet_key as _sheet_key, serial_of
+from .identity import sheet_key as _sheet_key, serial_of, severity
+from .revision import merge as _merge, doubtful as _doubtful
 
 IDLE, DETECTING, COMMITTED, COOLDOWN = "idle", "detecting", "committed", "cooldown"
 
@@ -73,6 +80,9 @@ HOLD_SECONDS = 1.5           # an unreadable ID is given this long (sheet still 
 TRACK_GAP = INTERRUPT_FRAMES  # consecutive non-contributing frames that end a track
 
 MISSED_MIN_FRAMES = 2        # ok frames a sheet must be seen in to count as "seen" for the missed-sheet check
+
+REVISE_FRAMES = 40           # ok frames after a commit during which the same sheet's evidence may still revise it ...
+REVISE_SECONDS = 6.0         # ... or this many seconds, whichever ends first (or earlier: nothing doubtful is left)
 
 ABSENT = ("no_sheet", "partial")
 
@@ -202,12 +212,14 @@ class StreamSession:
         self._nonok = 0                              # consecutive non-ok frames
         self._interrupted = False                    # sheet disturbed since the last commit
         self._prev_quad: Optional[tuple] = None      # (cx, cy, size) of the previous ok frame
+        self._rev: Optional[dict] = None             # revision watch of the committed track (see _revise)
 
     # ------------------------------------------------------------------ main entry
     def feed(self, r, t: float, payload: Any = None) -> dict:
         self.frame_index += 1
         commit = None
         hint = ""
+        self._revision = None
         status = r.status
         r0 = r
         pre = None                    # commit produced by a track that ended with this frame
@@ -278,6 +290,8 @@ class StreamSession:
               "unread": bool(self._ep is not None and self._ep["commits"] == 0 and self._ep["frames"] >= MISSED_MIN_FRAMES)}
         if commit is not None:
             ev["commit"] = commit
+        elif self._revision is not None:
+            ev["revision"] = self._revision
         return ev
 
     def finish(self, t: float = 0.0) -> Optional[dict]:
@@ -313,6 +327,9 @@ class StreamSession:
                   "t": t, "frames": frames, "frame_index": self.frame_index, "fused_frames": final.fused_frames}
         self._committed_key = key
         self._committed_res = final
+        self._rev = None
+        if track is not None and self.fuse and _doubtful(final):
+            self._rev = {"track": track, "base": final, "t0": t, "n": 0, "contra": set(), "count": 0}
         sid = sheet_id(final)
         self._committed_ids.add(sid)
         if track is not None:
@@ -356,7 +373,8 @@ class StreamSession:
         if self._best is None or sharp > self._best[0]:
             self._best = (sharp, r, payload, t)
         if tr is not None and tr.committed:
-            return "", None                         # one commit per track, however the fused reading evolves
+            self._revise(tr, r, t)                  # one commit per track; later evidence may only revise it
+            return "", None
         committed_here = self.state == COOLDOWN and self._committed_key is not None
         if committed_here:
             if self._interrupted:
@@ -379,6 +397,35 @@ class StreamSession:
         best = self._pick()
         commit = self._do_commit(self._finalize(best[1]), best[2], best[3], key, self._run_n, tr)
         return "", commit
+
+    def _revise(self, tr, r, t) -> None:
+        """Same track, already committed: upgrade the committed result from the newly fused frame `r` (see module doc)."""
+        rv = self._rev
+        if rv is None or rv["track"] is not tr:
+            return
+        rv["n"] += 1
+        if rv["n"] > REVISE_FRAMES or t - rv["t0"] > REVISE_SECONDS:
+            self._rev = None
+            return
+        base = rv["base"]
+        _, changed, contra = _merge(base, r)
+        new_contra = [c for c in contra if c not in rv["contra"]]
+        if not changed and not new_contra:
+            return
+        merged, changed, contra = _merge(base, tr.apply(tr.best[1]))      # images / geometry of the sharpest frame so far
+        rv["contra"].update(contra)
+        rv["count"] += 1
+        key = decision_key(merged)
+        ev = {"result": merged, "payload": tr.best[2], "key": key, "identity": identity(merged), "t": t, "frames": tr.n,
+              "frame_index": self.frame_index, "fused_frames": merged.fused_frames, "changed": changed,
+              "contradiction": sorted(rv["contra"]), "new_contradiction": new_contra, "revision": rv["count"],
+              "severity": severity(merged), "prev_severity": severity(base), "prev_key": self._committed_key}
+        rv["base"] = merged
+        self._committed_key, self._committed_res = key, merged
+        self._committed_ids.add(sheet_id(merged))
+        if not _doubtful(merged):
+            self._rev = None
+        self._revision = ev
 
     def _same_by_evidence(self, r) -> bool:
         """After an interruption: a re-sighting whose ID is only partly readable but whose readable digits

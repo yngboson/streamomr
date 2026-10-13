@@ -357,3 +357,53 @@ def test_guessed_answers_are_graded_and_exported_as_guessed(svc):
     assert "guessed:2" in row[1] and "multi:3" in row[1] and ",4,1|2," in row[1]
     svc.set_answer_key(o.exam_id, [0, 3, [[0, 1]]] + [0] * 17)            # a set key: right only for exactly that set
     assert svc.grade(o.exam_id, "1001")["score"] == 20
+
+
+# ------------------------------------------------------------------ revision: a better reading supersedes the committed scan
+def _scans(svc):
+    c = sqlite3.connect(svc.db_path)
+    try:
+        return c.execute("SELECT id, exam_id, student_id_raw, moved_from FROM scans ORDER BY id").fetchall()
+    finally:
+        c.close()
+
+
+def test_revision_assigns_a_previously_unassigned_scan_without_duplicates(svc):
+    first = svc.ingest(res("07", None))                              # ID unreadable at commit
+    assert first.kind == "unassigned"
+    out = svc.supersede_scan(first.scan_id, res("07", "1001"))       # ... a later frame reads it
+    assert out.kind == "new" and out.student_id == "1001" and out.scan_id != first.scan_id
+    ex = by_subject(svc)["07"]
+    assert svc.list_students(ex["id"]) == ["1001"] and svc.list_unassigned(ex["id"]) == []
+    assert len(_scans(svc)) == 2                                     # the original row is kept for audit
+    assert svc.scan_count(ex["id"]) >= 1 and svc.get_submission(out.submission_id)["status"] == "ok"
+
+
+def test_revision_routes_out_of_the_holding_exam_and_keeps_overrides(svc):
+    first = svc.ingest(res(None, "1001"))
+    assert first.kind == "unassigned" and first.subject is None
+    out = svc.supersede_scan(first.scan_id, res("07", "1001"))
+    assert out.kind == "new" and out.subject == "07" and by_subject(svc)["07"]["id"] == out.exam_id
+    assert svc.list_unassigned(first.exam_id) == []
+    svc.override_answer(out.submission_id, 1, [2], "human")
+    out2 = svc.supersede_scan(out.scan_id, res("07", "1001", marks={1: [1]}))     # a second revision of the same sheet
+    assert out2.kind == "new" and out2.submission_id == out.submission_id
+    eff = svc.get_submission(out.submission_id)
+    assert eff["status"] == "ok" and len(_scans(svc)) == 3
+    c = sqlite3.connect(svc.db_path)
+    assert c.execute("SELECT COUNT(*) FROM answer_overrides WHERE submission_id=?", (out.submission_id,)).fetchone()[0] == 1
+    c.close()
+
+
+def test_revision_keeps_a_human_assignment(svc):
+    first = svc.ingest(res("07", None))
+    svc.assign_scan(first.scan_id, "2002", "by hand")
+    out = svc.supersede_scan(first.scan_id, res("07", "1001"))      # the person already said it is 2002
+    assert out.student_id == "2002" and svc.list_students(out.exam_id) == ["2002"]
+
+
+def test_revision_does_not_conflict_with_the_scan_it_replaces(svc):
+    first = svc.ingest(res("07", "1001"))
+    out = svc.supersede_scan(first.scan_id, res("07", "1001", marks={1: [3]}))   # same student, an answer upgraded
+    assert out.kind == "new" and svc.get_submission(out.submission_id)["status"] == "ok"
+    assert svc.list_conflicts(out.exam_id) == []

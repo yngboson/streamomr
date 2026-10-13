@@ -344,17 +344,8 @@ class OmrService:
         return {"path": path, "serials": serials, "pages": len(serials) * lay.total_pages, "form_key": r["form_key"]}
 
     # ------------------------------------------------------------------ ingest
-    def ingest(self, result, images: Optional[dict] = None, source: str = "stream") -> IngestOutcome:
-        """Store the scan in the exam of its (form_key, subject) - created on first use - then apply the
-        duplicate/conflict policy.  A scan whose subject code was not readable goes to the form's holding exam
-        (subject NULL) and is never placed: a human routes it with ``route_scan``.
-
-        ``result``: RecognitionResult or its ``to_dict()``.  ``images``: optional dict with
-        ``original`` / ``warped`` / ``name_crop`` (ndarray or PNG/JPEG bytes); missing ones are
-        taken from ``result.warped`` / ``result.name_crop`` when present.
-        """
-        if source not in ("stream", "upload"):
-            raise ValueError("source must be 'stream' or 'upload'")
+    def _prepare(self, result, images):
+        """Validate a result for storage -> IngestOutcome("rejected") or (d, layout, form_key, page, subject, raw_id, paths)."""
         d = result if isinstance(result, dict) else result.to_dict()
         images = dict(images or {})
         for k, attr in (("warped", "warped"), ("name_crop", "name_crop")):
@@ -386,6 +377,23 @@ class OmrService:
 
         raw_id = None if _guessed(d, "id") else norm_student(d.get("student_id"))   # a guessed ID is never a confirmed student
         paths = self._save_images(form_key, images)
+        return d, layout, form_key, page, subject, raw_id, paths
+
+    def ingest(self, result, images: Optional[dict] = None, source: str = "stream") -> IngestOutcome:
+        """Store the scan in the exam of its (form_key, subject) - created on first use - then apply the
+        duplicate/conflict policy.  A scan whose subject code was not readable goes to the form's holding exam
+        (subject NULL) and is never placed: a human routes it with ``route_scan``.
+
+        ``result``: RecognitionResult or its ``to_dict()``.  ``images``: optional dict with
+        ``original`` / ``warped`` / ``name_crop`` (ndarray or PNG/JPEG bytes); missing ones are
+        taken from ``result.warped`` / ``result.name_crop`` when present.
+        """
+        if source not in ("stream", "upload"):
+            raise ValueError("source must be 'stream' or 'upload'")
+        prep = self._prepare(result, images)
+        if isinstance(prep, IngestOutcome):
+            return prep
+        d, layout, form_key, page, subject, raw_id, paths = prep
         with db.session(self.db_path, write=True) as c:
             exam = self._ensure_exam(c, form_key, subject, layout)
             cur = c.execute(
@@ -410,6 +418,72 @@ class OmrService:
                 self._act(c, exam["id"], "unassigned", scan_id=scan_id)
                 return IngestOutcome("unassigned", scan_id, exam["id"], page=page, subject=subject, form_key=form_key)
             return self._place(c, exam["id"], scan_id, raw_id)
+
+    def supersede_scan(self, old_scan_id: int, result, images: Optional[dict] = None) -> IngestOutcome:
+        """A REVISED reading of a sheet already ingested as ``old_scan_id`` (omr.stream "revision" event): the new
+        result is stored as a new scan that takes the old one's place - the old row is kept for audit and leaves every
+        queue through a ``scan_moves`` record (note "revision"), exactly like a human move.  The policy then runs for the
+        new scan, so it neither duplicates nor conflicts with the scan it replaces: a revised ID that is now confident
+        assigns a previously unassigned scan, a confident subject routes it out of the holding exam.
+        Human decisions win: a student assigned by hand stays (travels to the new scan), a hand-routed subject stays,
+        and answer overrides stay on the submission (they are keyed by submission, not scan)."""
+        with db.session(self.db_path, write=True) as c:
+            old = c.execute("SELECT * FROM scans WHERE id=?", (old_scan_id,)).fetchone()
+            if old is None:
+                raise KeyError(f"no scan {old_scan_id}")
+            human_route = False
+            for _ in range(32):        # follow the chain to the live copy
+                m = c.execute("SELECT * FROM scan_moves WHERE from_scan_id=?", (old["id"],)).fetchone()
+                if m is None:
+                    break
+                human_route = human_route or m["note"] != "revision"
+                old = c.execute("SELECT * FROM scans WHERE id=?", (m["to_scan_id"],)).fetchone()
+        prep = self._prepare(result, images)
+        if isinstance(prep, IngestOutcome):
+            return prep
+        d, layout, form_key, page, subject, raw_id, paths = prep
+        with db.session(self.db_path, write=True) as c:
+            old_exam = c.execute("SELECT * FROM exams WHERE id=?", (old["exam_id"],)).fetchone()
+            if form_key != old_exam["form_key"] or page != old["page"]:
+                return IngestOutcome("rejected", form_key=form_key, reason="revision is another form / page")
+            exam = old_exam if human_route and old_exam["subject"] is not None else self._ensure_exam(c, form_key, subject, layout)
+            own = c.execute("SELECT student_id FROM scan_owner WHERE scan_id=?", (old["id"],)).fetchone()
+            old_owner = own["student_id"]
+            human_owner = c.execute("SELECT student_id FROM assignments WHERE scan_id=? ORDER BY id DESC LIMIT 1",
+                                    (old["id"],)).fetchone()
+            cur = c.execute(
+                "INSERT INTO scans(exam_id,page,subject_raw,moved_from,student_id_raw,result_json,result_hash,content_hash,original_path,"
+                "warped_path,name_crop_path,source,created_at,needs_review,id_sig,serial,sheet_key) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (exam["id"], page, old["subject_raw"] if human_route else subject, old["id"], raw_id, json.dumps(d), result_hash(d, raw_id),
+                 content_hash(d), paths.get("original") or old["original_path"], paths.get("warped") or old["warped_path"],
+                 paths.get("name_crop") or old["name_crop_path"], old["source"], db.now(), int(bool(d.get("needs_review"))),
+                 id_signature(d), serial_of(d), result_sheet_key(d)))
+            new_id = cur.lastrowid
+            c.execute("INSERT INTO scan_moves(from_scan_id,to_scan_id,from_exam_id,to_exam_id,note,created_at) VALUES(?,?,?,?,?,?)",
+                      (old["id"], new_id, old["exam_id"], exam["id"], "revision", db.now()))
+            self._act(c, old["exam_id"], "revision", scan_id=old["id"], student_id=old_owner,
+                      detail={"to_scan": new_id, "to_exam": exam["id"], "flags": d.get("flags")})
+            if old_owner is not None:
+                osub = c.execute("SELECT id FROM submissions WHERE exam_id=? AND student_id=? AND page=?",
+                                 (old["exam_id"], old_owner, page)).fetchone()
+                if osub:
+                    self._after_removal(c, osub["id"])
+            owner = raw_id
+            if human_owner is not None:                    # a person's student decision about the sheet outlives the revision
+                owner = human_owner["student_id"]
+                c.execute("INSERT INTO assignments(scan_id,student_id,note,created_at) VALUES(?,?,?,?)",
+                          (new_id, owner, "carried over (revision)", db.now()))
+            if exam["subject"] is None:
+                fl = d.get("flags") or []
+                reason = ("subject_blank" if "subject_blank" in fl else "subject_guessed" if "subject_guessed" in fl
+                          else "subject_unreadable")
+                self._act(c, exam["id"], "unassigned", scan_id=new_id, detail={"reason": reason})
+                return IngestOutcome("unassigned", new_id, exam["id"], page=page, reason=reason, subject=None, form_key=form_key)
+            if owner is None:
+                self._act(c, exam["id"], "unassigned", scan_id=new_id)
+                return IngestOutcome("unassigned", new_id, exam["id"], page=page, subject=exam["subject"], form_key=form_key)
+            return self._place(c, exam["id"], new_id, owner)
 
     def _decision_of(self, c, scan) -> tuple:
         """(exam_id, owner) a human decision on ``scan`` led to: a moved scan is followed to its (final) copy."""

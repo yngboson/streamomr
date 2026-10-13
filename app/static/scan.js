@@ -18,16 +18,21 @@ function tone(freq, at, dur, type, vol) {
   g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
   o.start(t); o.stop(t + dur + 0.02);
 }
-function feedback(sev) {
+// kind 'resolved': a committed doubtful sheet became confident on later frames (soft rising chime, green border);
+// kind 'contradiction': later frames contradict a row that was confident at commit (warning tone, amber border)
+function feedback(sev, kind) {
   sev = FB_MS[sev] ? sev : 'ok';
+  if (kind === 'resolved') sev = 'ok'; else if (kind === 'contradiction' && sev === 'ok') sev = 'minor';
   if (audio) {
-    if (sev === 'ok') tone(1040, 0, 0.18, 'sine', 0.2);
+    if (kind === 'resolved') { tone(784, 0, 0.12, 'sine', 0.1); tone(1175, 0.12, 0.22, 'sine', 0.1); }
+    else if (kind === 'contradiction') { tone(466, 0, 0.12, 'square', 0.1); tone(466, 0.2, 0.12, 'square', 0.1); }
+    else if (sev === 'ok') tone(1040, 0, 0.18, 'sine', 0.2);
     else if (sev === 'minor') { tone(740, 0, 0.13, 'triangle', 0.28); tone(587, 0.16, 0.16, 'triangle', 0.28); }
     else for (let k = 0; k < 3; k++) tone(294, k * 0.22, 0.16, 'square', 0.12);
   }
   stage.classList.remove('fb-ok', 'fb-minor', 'fb-severe'); void stage.offsetWidth; stage.classList.add('fb-' + sev);
   clearTimeout(fbTimer); fbTimer = setTimeout(() => stage.classList.remove('fb-' + sev), FB_MS[sev]);
-  if (navigator.vibrate) navigator.vibrate(sev === 'ok' ? 60 : sev === 'minor' ? [80, 60, 80] : [200, 80, 200, 80, 200]);
+  if (navigator.vibrate) navigator.vibrate(kind === 'resolved' ? 30 : sev === 'ok' ? 60 : sev === 'minor' ? [80, 60, 80] : [200, 80, 200, 80, 200]);
 }
 const SEV_TEXT = { minor: '확인할 문항 있음', severe: '학번/과목 인식 실패' };
 function fixButton(sev, open) {   // banner button after a non-ok commit: opens the detail with 정정 buttons
@@ -147,6 +152,14 @@ function connect() {
       $('res').textContent = `${subjLabel(o.subject === undefined ? s.subject : o.subject)} · ${o.student_id ?? s.student_id ?? '(번호 없음)'}`;
       if (o.scan_id) fixButton(sev, () => OmrDetail.openScan(o.scan_id));
       refreshCounts();
+    }
+    if (e.revision) {   // later frames improved (or contradict) the sheet committed before: the server replaced that scan
+      const o = e.revision.outcome, s = e.revision.summary, sev = s.severity || 'ok', contra = (e.revision.contradiction || []).length > 0;
+      const rank = { ok: 0, minor: 1, severe: 2 };
+      $('res').textContent = `${subjLabel(o.subject === undefined ? s.subject : o.subject)} · ${o.student_id ?? s.student_id ?? '(번호 없음)'}` + (contra ? ' · 재확인 필요' : sev === 'ok' ? ' · 확인됨' : '');
+      if (contra) feedback('minor', 'contradiction'); else if (rank[sev] < rank[e.revision.prev_severity || 'ok']) feedback(sev, 'resolved');
+      if (o.scan_id) fixButton(sev, () => OmrDetail.openScan(o.scan_id));
+      loadRecent(); refreshCounts();
     }
     const now = performance.now();
     if (now - fpsT > 1000) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; }

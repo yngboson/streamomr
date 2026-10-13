@@ -299,3 +299,93 @@ def test_guessed_id_is_no_evidence_a_pile_swap_still_commits_and_the_commit_stay
     H = StreamSession()
     H._since = 0.0
     assert "ID" in H._unstable_hint(N, 99.0)
+
+
+# ---------------------------------------------------------------- revision of a committed sheet (omr/revision.py)
+import test_fusion as TF  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def fw(tmp_path_factory):
+    assets = synth.prepare(str(tmp_path_factory.mktemp("sheets_rev")), {"q30": synth.STANDARD_TEMPLATES["q30_abcd"]})
+    L, pdf = assets["q30"]
+
+    def rec(mode, seed):
+        frame, _ = synth.make_frame(L, pdf, synth.CONDS["clean"], np.random.default_rng(seed), mode=mode)
+        return recognize(frame)
+
+    good = [r for r in (rec("sheet", s) for s in range(1, 25)) if r.status == "ok" and r.student_id and r.subject and not r.id_guessed
+            and not r.subject_guessed and not any(a.ambiguous for a in r.answers)]
+    A = good[0]
+    B = next(r for r in good if r.student_id != A.student_id and r.subject != A.subject)
+    return {"A": A, "B": B, "E": rec("none", 3)}
+
+
+def _doubt_row(r, q):
+    """Frame whose answer row q is a grey zone (doubtful) in this frame."""
+    FA = r.raw.FA.copy()
+    p = int(np.argmax(FA[q]))
+    FA[q] = np.where(FA[q] > 0.5, 0.45, FA[q])
+    FA[q, (p + 1) % FA.shape[1]] = 0.45
+    return TF.remake(r, FA=FA)
+
+
+def revisions(evs):
+    return [e["revision"] for e in evs if "revision" in e]
+
+
+def test_revision_resolves_unreadable_id_after_commit(fw):
+    A, E = fw["A"], fw["E"]
+    seq = [TF.light_digits(A, [0]) for _ in range(16)] + [A] * 16 + [E] * 6
+    evs = run(StreamSession(), seq)
+    cs, rs = commits(evs), revisions(evs)
+    assert len(cs) == 1 and cs[0]["result"].student_id is None
+    assert rs and rs[-1]["result"].student_id == A.student_id and "id" in rs[0]["changed"]
+    assert rs[0]["prev_severity"] == "severe" and rs[-1]["severity"] in ("ok", "minor")
+    assert len(cs) == 1                                               # never a second commit
+
+
+def test_revision_upgrades_doubtful_answer_row(fw):
+    A, E = fw["A"], fw["E"]
+    q = 4
+    seq = [_doubt_row(A, q) for _ in range(16)] + [A] * 16 + [E] * 6
+    evs = run(StreamSession(), seq)
+    cs, rs = commits(evs), revisions(evs)
+    assert len(cs) == 1 and cs[0]["result"].answers[q].ambiguous
+    assert rs and f"q{q + 1}" in rs[0]["changed"] or any(f"q{A.answers[q].number}" in x["changed"] for x in rs)
+    last = rs[-1]["result"]
+    assert not last.answers[q].ambiguous and (last.answers[q].state, last.answers[q].marked) == (A.answers[q].state, A.answers[q].marked)
+    assert not rs[-1]["contradiction"]
+
+
+def test_revision_never_flips_a_confident_row_silently(fw):
+    A, E = fw["A"], fw["E"]
+    seq = [TF.light_digits(A, [0]) for _ in range(16)]                # commit with a doubtful ID ...
+    B = flip_answer(A, 0)                                             # ... then the fused evidence says Q1 is something else
+    B = TF.remake(A, FA=_swap_row(A, 0))
+    evs = run(StreamSession(), seq + [B] * 24 + [E] * 6)
+    rs = revisions(evs)
+    cs = commits(evs)
+    committed = cs[0]["result"].answers[0]
+    for x in rs:
+        a = x["result"].answers[0]
+        assert (a.state, a.marked) == (committed.state, committed.marked)     # the committed confident row is untouched
+    assert any(x["contradiction"] for x in rs) or not rs
+    for x in rs:
+        if x["contradiction"]:
+            assert "contradiction" in x["result"].flags and x["result"].needs_review and x["severity"] != "ok"
+
+
+def _swap_row(r, q):
+    FA = r.raw.FA.copy()
+    row = FA[q].copy()
+    FA[q] = np.roll(row, 1)
+    return FA
+
+
+def test_no_revision_for_a_different_sheet(fw):
+    A, B, E = fw["A"], fw["B"], fw["E"]
+    seq = [TF.light_digits(A, [0]) for _ in range(16)] + [B] * 8 + [E] * 6
+    evs = run(StreamSession(), seq)
+    assert len(commits(evs)) == 2 and not revisions(evs)
+    assert commits(evs)[1]["result"].student_id == B.student_id
