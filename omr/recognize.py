@@ -25,7 +25,7 @@ from . import ink as inkmod
 from . import layout as lay
 from . import markers as mk
 from . import tracks as trk
-from .fastops import pct_rows
+from .fastops import pct1, pct_axis0, pct_rows
 from .detect import find_markers, find_markers_scaled
 
 DEFAULT_PX_PER_MM = 6.0
@@ -428,7 +428,7 @@ def _flatten_header(warped: np.ndarray, ppm: float) -> np.ndarray:
     # rows far below the header are never read (registration reaches < 25 mm from a row): neither converted nor integrated
     out = warped[:min(y1 + int(round(HEADER_REACH_MM * ppm)), warped.shape[0])].astype(np.float32)
     band = out[y0:y1]
-    paper = np.percentile(band, HEADER_FLAT_PCT, axis=0).astype(np.float32)
+    paper = pct_axis0(band, HEADER_FLAT_PCT).astype(np.float32)
     paper = cv2.GaussianBlur(paper.reshape(1, -1), (0, 0), HEADER_FLAT_SIGMA_MM * ppm).reshape(-1)
     out[y0:y1] = np.clip(band / np.maximum(paper, 8.0) * 235.0, 0, 255)
     return out
@@ -523,7 +523,7 @@ def _read_header_pass(flat: np.ndarray, ii: np.ndarray, ppm: float, search, disa
             c = flat[max(y0_, 0):max(int(round((y + dy[i] + 0.8 * h) * ppm)), y0_ + 1),
                      max(x0_, 0):max(int(round((x + dx[i] + 0.8 * w) * ppm)), x0_ + 1)]
             if c.size:
-                blacks.append(1.0 - float(np.percentile(c, BLACK_PERCENTILE)) / paper[i])
+                blacks.append(1.0 - float(pct1(c, BLACK_PERCENTILE)) / paper[i])
         sb = [i for i, b in enumerate(mk.HEADER_START_GUARD) if b]
         sw = [i for i, b in enumerate(mk.HEADER_START_GUARD) if not b]
         eb = [n - g1 + i for i, b in enumerate(mk.HEADER_STOP_GUARD) if b]
@@ -1158,7 +1158,7 @@ DROP_RETRY_SKIP_FLAGS = ("page_mismatch", "layout_mismatch")
 
 
 def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Optional[lay.Layout]]] = None,
-              px_per_mm: float = DEFAULT_PX_PER_MM, keep_images: bool = True) -> RecognitionResult:
+              px_per_mm: float = DEFAULT_PX_PER_MM, keep_images: bool = True, prior=None) -> RecognitionResult:
     """Read one frame.  A curled corner can carry a marker that is found but does not lie on the sheet's plane: the
     four-marker homography then fails (marker reprojection error, header off its cells) where the other three alone,
     with the ring alignment / tracks bending the rest, read fine.  So a frame that fails geometry or header with all four
@@ -1166,7 +1166,7 @@ def recognize(image: np.ndarray, resolve_layout: Optional[Callable[[int], Option
     t_start = time.perf_counter()
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     t0 = time.perf_counter()
-    det = find_markers_scaled(gray)
+    det = find_markers_scaled(gray, prior)
     t_det = (time.perf_counter() - t0) * 1000.0
     res = _recognize(gray, det, resolve_layout, px_per_mm, keep_images, t_start, t_det)
     if res.status in DROP_RETRY_STATUSES and not any(f in res.flags for f in DROP_RETRY_SKIP_FLAGS):

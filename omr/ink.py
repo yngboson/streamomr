@@ -48,7 +48,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from . import layout as lay
-from .fastops import pct_rows
+from .fastops import pct1, pct_rows
 
 MARKER_CELLS = 6                 # ArUco 4x4 pattern incl. its black border: 6 x 6 cells
 MARKER_BLACK_PERCENTILE = 75     # of the border pixels' darkness: the darkest quartile (robust to white toner streaks)
@@ -185,7 +185,7 @@ def local_levels(row_marks: Sequence[float], floor: float, fallback: float,
                 lo, hi = max(0, j - r), min(len(idx), j + r + 1)
                 w = v[lo:hi][ok[lo:hi]]
                 if len(w) >= LOCAL_MIN_MARKS:
-                    lvl = max(floor, float(np.percentile(w, LOCAL_PCT if windowed else 50)))
+                    lvl = max(floor, float(pct1(w, LOCAL_PCT if windowed else 50)))
                     out[idx[j]] = lvl if lvl < (1.0 - LOCAL_DEADBAND) * fallback else fallback
                     break
     return out

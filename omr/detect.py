@@ -364,7 +364,7 @@ def _search_window(gray, miss, side, ctr, roi_f, max_off):
     return None, runs
 
 
-def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:
+def find_markers(gray: np.ndarray, stack_seen: bool = False) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:
     """-> (id -> 4x2 corners (TL, TR, BR, BL), duplicate/inconsistent id seen, info).
 
     info: passes (number of detector runs), kernel (px of the pass that completed the set, 0 = plain).
@@ -372,7 +372,10 @@ def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[st
     Cost control (a stream spends most frames without a readable sheet, and those used to cost MORE than a read): the speculative
     full-frame passes (opened ladder, lighting-flattened) only run on evidence.  Evidence = a marker was decoded, or ArUco rejected a
     candidate that looks like a marker (`markerlike`).  When the decoded markers predict the rest of their page outside the frame, nothing more is searched;
-    with a marker decoded only its own scale is tried (one opened pass, not the whole ladder)."""
+    with a marker decoded only its own scale is tried (one opened pass, not the whole ladder).
+
+    `stack_seen`: a prior window (detect_prior) already found markers of the sheet in view, so what is missing is hidden (a hand, the sheet being
+    lifted away), not damaged: the speculative passes are skipped, only the plain pass and the cheap `_complete` run."""
     det = _detector()
     m = _Merge()
     corners, ids, rej = det.detectMarkers(gray)
@@ -383,6 +386,9 @@ def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[st
     info = lambda: {"detect_passes": float(passes), "detect_kernel": float(used)}
     if not m.solid():
         _redecode(m, gray, (gray,), rej, min_side)
+    if not m.solid() and stack_seen:
+        passes += _complete(m, gray)
+        return m.found, m.dup, info()
     if not m.solid():
         if _off_frame(m, gray.shape):
             return m.found, m.dup, info()
@@ -439,19 +445,82 @@ def find_markers(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[st
     return m.found, m.dup, info()
 
 
+# ---------------------------------------------------------------- temporal prior (video)
+PRIOR_PAD = 1.2          # a prior marker is searched in a window this many marker sides wider than the marker, on every side
+PRIOR_MAX_SHIFT = 0.9    # ... and accepted when its centre moved less than this many marker sides since the previous frame
+
+
+def prior_from(res_corners) -> Optional[Dict[int, np.ndarray]]:
+    """The marker corners of a frame result (RecognitionResult.marker_corners: id -> 4x2 list) as a prior for the next frame, or None
+    when fewer than MIN_FOR_STOP markers of one page group are known (a half-hidden sheet is not a position to rely on)."""
+    if not res_corners:
+        return None
+    groups: Dict[int, int] = {}
+    for i in res_corners:
+        groups[i // 4] = groups.get(i // 4, 0) + 1
+    g, n = max(groups.items(), key=lambda kv: kv[1])
+    if n < MIN_FOR_STOP:
+        return None
+    return {i: np.asarray(c, np.float64).reshape(4, 2) for i, c in res_corners.items() if i // 4 == g}
+
+
+def detect_prior(gray: np.ndarray, prior: Dict[int, np.ndarray]) -> Dict[int, np.ndarray]:
+    """The prior's markers searched only in a small window around where each was in the previous frame (a camera held over a stack of
+    sheets sees the next sheet's markers where the last one's were).  A window is ~3-4 marker sides wide, so a detector run costs
+    ~1 ms instead of ~15 ms for the frame.  Only the SAME id found near its old place counts."""
+    h, w = gray.shape[:2]
+    det, out = _detector(), {}
+    for mid, q in prior.items():
+        side = _side(q)
+        ctr = q.mean(0)
+        r = (0.5 + PRIOR_PAD) * side
+        x0, y0 = np.maximum((ctr - r).astype(int), 0)
+        x1, y1 = np.minimum((ctr + r).astype(int) + 1, [w, h])
+        if x1 - x0 < side or y1 - y0 < side:
+            continue
+        corners, ids, _ = det.detectMarkers(gray[y0:y1, x0:x1])
+        if ids is None:
+            continue
+        for c, i in zip(corners, ids.ravel()):
+            if int(i) != mid:
+                continue
+            c = c.reshape(4, 2).astype(np.float64) + (x0, y0)
+            if np.linalg.norm(c.mean(0) - ctr) < PRIOR_MAX_SHIFT * side:
+                out[mid] = c
+                break
+    return out
+
+
 # ---------------------------------------------------------------- resolution-aware detection
 DETECT_LONG_SIDE = 1920                  # frames larger than this are searched on an INTER_AREA copy, corners refined at full size
 
 
-def find_markers_scaled(gray: np.ndarray) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:
+def find_markers_scaled(gray: np.ndarray, prior: Optional[Dict[int, np.ndarray]] = None) -> Tuple[Dict[int, np.ndarray], bool, Dict[str, float]]:
     """find_markers, but on a copy whose long side is DETECT_LONG_SIDE when the frame is larger (24 MP photos);
-    the corners are mapped back and sub-pixel refined on the full-size image. Frames up to that size run unchanged."""
+    the corners are mapped back and sub-pixel refined on the full-size image. Frames up to that size run unchanged.
+
+    `prior` (omr.detect.prior_from of the previous frame): the markers are first looked for in small windows where they were; when they are
+    all (>= 3) there, that is the answer; when some are, the plain pass decides whether another sheet is in view and the speculative passes
+    (opened ladder, flattening) are skipped - the rest of the sheet is hidden, not damaged."""
     h, w = gray.shape[:2]
     s = DETECT_LONG_SIDE / max(h, w)
+    small = gray if s >= 1.0 else cv2.resize(gray, (max(int(round(w * s)), 1), max(int(round(h * s)), 1)), interpolation=cv2.INTER_AREA)
+    k = 1.0 if s >= 1.0 else s
+    near, stack_seen = {}, False
+    if prior:
+        near = detect_prior(small, {i: c * k for i, c in prior.items()})
+        stack_seen = bool(near)
+        if len(near) >= MIN_FOR_STOP:
+            m = _Merge()
+            m.add([c.reshape(1, 4, 2) for c in near.values()], np.array(list(near)).reshape(-1, 1))
+            passes = _complete(m, small)          # a 4th marker the windows did not give (same search as after a full pass)
+            found, dup, info = m.found, m.dup, {"detect_passes": float(passes), "detect_kernel": 0.0, "detect_prior": 1.0}
+        else:
+            found, dup, info = find_markers(small, stack_seen)
+    else:
+        found, dup, info = find_markers(small)
     if s >= 1.0:
-        return find_markers(gray)
-    small = cv2.resize(gray, (max(int(round(w * s)), 1), max(int(round(h * s)), 1)), interpolation=cv2.INTER_AREA)
-    found, dup, info = find_markers(small)
+        return found, dup, info
     sx, sy = w / small.shape[1], h / small.shape[0]
     out = {}
     for i, c in found.items():

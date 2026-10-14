@@ -8,6 +8,7 @@ const TARGET_FPS = 8;
 let stream = null, track = null, audio = null, running = false, ready = false;
 let busy = false, lastOv = null, lastState = 'idle', lastSend = 0, torchOn = false, frameId = 0;
 let sentDims = '-', frames = 0, fpsT = performance.now(), fps = 0, rtt = 0;
+let beaconed = false;   // a 'beacon' message already gave the feedback for the commit whose result is about to arrive
 let lastScan = null;   // the scan committed last (a revision event refers to it)
 const scans = [];   // in-memory results of this page load
 
@@ -465,6 +466,7 @@ function startWorker() {
     if (m.type === 'progress') { $('loadmsg').textContent = m.text; }
     else if (m.type === 'ready') { ready = true; $('loading').hidden = true; $('start').disabled = false; $('hint').textContent = '시작을 누르세요'; }
     else if (m.type === 'error') { if (DEV) devLog('ERROR', 'worker: ' + m.text); $('loadtitle').textContent = '불러오기 실패'; $('loadmsg').textContent = m.text; $('hint').textContent = '불러오기 실패: ' + m.text; }
+    else if (m.type === 'beacon') { feedback(m.severity); beaconed = true; if (DEV) devLog('BEACON', `commit feedback ${m.severity} (event follows)`); }
     else if (m.type === 'result') { const tr = performance.timeOrigin + performance.now(), p0 = performance.now(), e = JSON.parse(m.json); onResult(e, m.ms, { recvAt: tr, parseMs: performance.now() - p0, m }); }
   };
   worker.postMessage({ type: 'init', sources: JSON.parse($('omr-src').textContent), pyodideBase: PYODIDE_BASE });
@@ -481,7 +483,8 @@ function onResult(e, wms, tm) {
   if (e.commit) {
     const s = e.commit.summary; s.time = new Date().toISOString();
     const sev = s.severity || 'ok';
-    feedback(sev); addScan(s, e.commit.detail); s.detail = e.commit.detail; lastScan = s;
+    if (beaconed) beaconed = false; else feedback(sev);      // the worker's beacon already beeped when the commit was decided
+    addScan(s, e.commit.detail); s.detail = e.commit.detail; lastScan = s;
     if (DEV) devOnCommit(s, e.commit);
     $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}`;
     if (e.commit.detail && e.commit.detail.img) fixButton(sev, () => showDetail(s, e.commit.detail));

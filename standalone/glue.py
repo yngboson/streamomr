@@ -116,6 +116,17 @@ def explain(result) -> dict:
     return out
 
 
+def _beacon(summary) -> None:
+    """Tell the page about a commit the moment it is decided: the main thread beeps / flashes at once, before the rest of the event
+    (detail sheet JPEG ~20 ms native, dev trace ~60 ms) is built, serialised and posted.  No-op outside Pyodide (native tests)."""
+    try:
+        import js
+        from pyodide.ffi import to_js
+        js.postMessage(to_js({"type": "beacon", "severity": summary.get("severity") or "ok"}, dict_converter=js.Object.fromEntries))
+    except Exception:
+        pass
+
+
 def summarize(result) -> dict:
     """Same fields as app/main.py::summarize, plus the marked labels per question (for display / CSV)."""
     return {"form_key": result.form_key, "page": result.page, "total_pages": result.total_pages,
@@ -199,7 +210,10 @@ class Scanner:
             c = ev.pop(name, None)
             if c is None:
                 continue
-            ev[name] = {"summary": summarize(c["result"]), "frames": c["frames"], "detail": detail(c["result"])}
+            summ = summarize(c["result"])
+            if name == "commit":
+                _beacon(summ)        # the beep must not wait for the detail JPEG / the dev trace below
+            ev[name] = {"summary": summ, "frames": c["frames"], "detail": detail(c["result"])}
             if name == "revision":
                 ev[name].update(changed=c["changed"], contradiction=c["contradiction"], prev_severity=c["prev_severity"], n=c["revision"])
             if DEV:

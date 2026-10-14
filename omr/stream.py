@@ -67,6 +67,7 @@ IDLE, DETECTING, COMMITTED, COOLDOWN = "idle", "detecting", "committed", "cooldo
 
 DEFAULT_K = 3
 DEFAULT_M = 5
+DEFAULT_FAST_K = 2           # frames needed instead of k when the fused result has nothing left to doubt (see `_confident`)
 DEFAULT_HINT_AFTER = 2.0     # seconds a sheet may be in view without stabilising before a hint appears
 INTERRUPT_FRAMES = 2         # consecutive non-ok frames that count as "the sheet was disturbed"
 JUMP_FRACTION = 0.2          # marker-quad centre jump, as a fraction of the sheet size
@@ -88,6 +89,12 @@ ABSENT = ("no_sheet", "partial")
 
 # overlay bubble codes
 B_EMPTY, B_MARKED, B_MULTI, B_AMBIGUOUS = 0, 1, 2, 3
+
+
+def _confident(r) -> bool:
+    """Nothing left to doubt: ID and subject read (not guessed), no review flag, every answer single and unambiguous."""
+    return (r.student_id is not None and r.subject is not None and not r.needs_review
+            and not r.id_guessed and not r.subject_guessed)
 
 
 def decision_key(r) -> tuple:
@@ -138,8 +145,12 @@ def is_other_sheet(committed_key: tuple, key: tuple) -> bool:
 class StreamSession:
     def __init__(self, k: int = DEFAULT_K, m: int = DEFAULT_M, hint_after: float = DEFAULT_HINT_AFTER,
                  allowed_forms: Optional[Iterable[str]] = None, allowed_subjects: Optional[Iterable[str]] = None,
-                 resolve_layout: Optional[Callable[[int], Any]] = None, fuse: bool = True, hold_s: float = HOLD_SECONDS):
+                 resolve_layout: Optional[Callable[[int], Any]] = None, fuse: bool = True, hold_s: float = HOLD_SECONDS,
+                 fast_k: Optional[int] = DEFAULT_FAST_K):
         self.fuse, self.hold_s = fuse, hold_s
+        self.fast_k = fast_k            # frames needed instead of k when the result is fully confident (None = always k)
+        if fast_k is not None and fast_k < 2:
+            raise ValueError("fast_k must be >= 2: a single frame must never commit")
         if k < 2:
             raise ValueError("k must be >= 2: a single frame must never commit")
         self.k, self.m, self.hint_after = k, m, hint_after
@@ -387,7 +398,7 @@ class StreamSession:
                     return "", None
             elif not is_other_sheet(self._committed_key, key):
                 return "", None                     # same sheet still in view (maybe flickering)
-        if self._run_n < self.k:
+        if self._run_n < (self.fast_k if self.fast_k is not None and _confident(r) else self.k):
             return self._unstable_hint(r, t) if self.state != COOLDOWN else "", None
         if tr is not None and (tr.id_unreadable() or tr.subject_unreadable()):   # stable, but may still resolve: hold while in view
             if tr.held_since is None:
