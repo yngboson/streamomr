@@ -9,3 +9,5 @@ node_modules/
 .claude/
 standalone/streamomr-dev.html
 docs/*.zip
+web/test/fixtures/
+web/streamomr-dev.html

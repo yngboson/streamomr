@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamOMR - 단독 스캐너</title>
+<style>
+/*__CSS__*/
+ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
+</style></head>
+<body>
+<div class="scan">
+  <div>
+    <div class="row" style="margin-bottom:8px">
+      <select id="cam"></select>
+      <button id="start" disabled>시작</button>
+      <button id="torch" class="secondary" hidden>플래시</button>
+      <button id="reset" class="secondary">초기화</button>
+    </div>
+    <div class="stage" id="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="ov"></canvas>
+      <div class="banner"><span class="state idle" id="state">대기</span><span id="res"></span></div>
+      <div class="hint" id="hint">불러오는 중...</div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div id="missed" class="err" style="font-weight:bold;margin-top:6px" hidden></div>
+  </div>
+  <div class="card">
+    <h1>최근 스캔</h1>
+    <div class="row" style="margin-bottom:8px"><button id="csv" class="secondary" disabled>CSV 다운로드</button><span class="mut small" id="count">0건</span></div>
+    <ul class="scans" id="recent"></ul>
+  </div>
+</div>
+<div id="loading" class="loading"><div><b id="loadtitle">StreamOMR 불러오는 중</b><div id="loadmsg" class="mut"></div></div></div>
+<script type="text/plain" id="worker-src">/*__WORKER__*/</script>
+<script>
+'use strict';
+/*__APP__*/
+/*__DEVJS__*/
+</script>
+</body></html>
