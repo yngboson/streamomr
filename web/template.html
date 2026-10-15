@@ -5,6 +5,30 @@
 <style>
 /*__CSS__*/
 ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
+
+.mk { position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.6); display:flex; justify-content:center; align-items:flex-end; }
+.mk[hidden] { display:none; }
+.mk-win { background:var(--bg); width:100%; max-width:560px; height:100%; max-height:100dvh; display:flex; flex-direction:column; }
+@media (min-width:700px) { .mk { align-items:center; } .mk-win { height:92vh; border-radius:14px; overflow:hidden; } }
+.mk-bar { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; padding-top:max(10px, env(safe-area-inset-top)); border-bottom:1px solid #2a313b; font-size:17px; }
+.mk-bar button { width:44px; height:44px; padding:0; font-size:18px; }
+.mk-body { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px; overscroll-behavior:contain; }
+.mk-card { background:var(--card); border-radius:12px; padding:12px 14px; margin:0 0 12px; }
+.mk-card .mk-f:first-child { margin-top:0; } .mk-card .mk-f:last-child { margin-bottom:0; }
+.mk-f { display:block; margin:10px 0; } .mk-l { color:var(--fg); margin-bottom:4px; }
+.mk input[type=text], .mk input[type=number], .mk select { width:100%; font-size:16px; min-height:44px; }
+.mk-st { display:flex; gap:8px; } .mk-st input { text-align:center; flex:1; min-width:0; }
+.mk-st button { width:52px; min-height:44px; padding:0; font-size:22px; line-height:1; }
+.mk-adv summary { min-height:32px; cursor:pointer; font-weight:600; }
+.mk-chk { display:flex; gap:10px; align-items:center; margin:0; color:var(--fg); min-height:44px; }
+.mk-chk input { width:22px; height:22px; }
+#mk-tabs button { padding:6px 14px; min-height:36px; } #mk-tabs button.on { background:#2b6cb0; border-color:#2b6cb0; }
+#mk-pvbox { background:#fff; border-radius:6px; padding:0; line-height:0; } #mk-pv { width:100%; height:auto; display:block; border-radius:6px; }
+.mk-foot { padding:10px 12px; padding-bottom:max(10px, env(safe-area-inset-bottom)); border-top:1px solid #2a313b; background:var(--bg); }
+.mk-foot button { width:100%; min-height:50px; font-size:17px; font-weight:700; } .mk-foot button:disabled { opacity:.5; }
+.mk-foot .small { margin-bottom:6px; }
+.mk-btn { display:inline-block; padding:12px 18px; min-height:44px; border-radius:8px; background:#2b6cb0; color:#fff; text-decoration:none; font-weight:600; }
+.mk-btn.secondary { background:#2a313b; }
 </style></head>
 <body>
 <div class="scan">
@@ -14,6 +38,7 @@ ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
       <button id="start" disabled>시작</button>
       <button id="torch" class="secondary" hidden>플래시</button>
       <button id="reset" class="secondary">초기화</button>
+      <button id="make" class="secondary">시험지 만들기</button>
     </div>
     <div class="stage" id="stage">
       <video id="video" playsinline muted autoplay></video>
@@ -30,11 +55,64 @@ ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
     <ul class="scans" id="recent"></ul>
   </div>
 </div>
+<div id="mk" class="mk" hidden role="dialog" aria-modal="true" aria-label="시험지 만들기">
+  <div class="mk-win">
+    <div class="mk-bar"><b>시험지 만들기</b><button type="button" id="mk-x" class="secondary" aria-label="닫기">&#10005;</button></div>
+    <div class="mk-body">
+      <div class="mk-card">
+        <label class="mk-f"><div class="mk-l">제목 <span class="mut small">시트에 인쇄 (선택)</span></div><input id="mk-title" type="text" enterkeyhint="done" placeholder="예: 2026 1학기 중간고사"></label>
+      <div class="mk-f"><div class="mk-l">문항 수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-questions-m" aria-label="문항 수 줄이기">&minus;</button><input id="mk-questions" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-questions-p" aria-label="문항 수 늘리기">+</button></div></div>
+      <div class="mk-f"><div class="mk-l">선지 수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-choices-m" aria-label="선지 수 줄이기">&minus;</button><input id="mk-choices" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-choices-p" aria-label="선지 수 늘리기">+</button></div></div>
+      </div>
+      <div class="mk-card">
+      <div class="mk-f"><div class="mk-l">수험번호 자릿수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-id_digits-m" aria-label="수험번호 자릿수 줄이기">&minus;</button><input id="mk-id_digits" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-id_digits-p" aria-label="수험번호 자릿수 늘리기">+</button></div></div>
+      <div class="mk-f"><div class="mk-l">과목코드 자릿수<span class="mut small"> 0 = 없음</span></div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-subject_digits-m" aria-label="과목코드 자릿수 줄이기">&minus;</button><input id="mk-subject_digits" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-subject_digits-p" aria-label="과목코드 자릿수 늘리기">+</button></div></div>
+      </div>
+      <details class="mk-card mk-adv"><summary>고급 설정</summary>
+      <div class="mk-f"><div class="mk-l">실제 사용 문항<span class="mut small"> 쓰지 않는 문항은 인쇄·인식 안 함</span></div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-used-m" aria-label="실제 사용 문항 줄이기">&minus;</button><input id="mk-used" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="전부"><button type="button" class="secondary" id="mk-used-p" aria-label="실제 사용 문항 늘리기">+</button></div></div>
+      <div class="mk-f"><div class="mk-l">쪽수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-pages-m" aria-label="쪽수 줄이기">&minus;</button><input id="mk-pages" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="자동"><button type="button" class="secondary" id="mk-pages-p" aria-label="쪽수 늘리기">+</button></div></div>
+
+        <div class="mk-f"><div class="mk-l">선지 표시</div><select id="mk-labels"><option value="1">1 2 3 4 5</option><option value="A">A B C D E</option><option value="a">a b c d e</option><option value="가">가 나 다 라 마</option></select></div>
+        <div class="mk-f"><div class="mk-l">버블 크기 <span class="mut small">mm</span></div><select id="mk-bubble"><option>4</option><option>4.25</option><option>4.5</option><option>4.75</option><option>5</option><option>5.25</option><option>5.5</option><option>5.75</option></select></div>
+      </details>
+      <div id="mk-err" class="err mk-card" hidden></div>
+      <div class="mk-card">
+        <div id="mk-info" class="small"></div>
+        <div id="mk-tabs" class="row" style="margin:8px 0"></div>
+        <div id="mk-pvbox"><canvas id="mk-pv" aria-label="미리보기"></canvas></div>
+      </div>
+      <div class="mk-card">
+        <label class="mk-chk"><input type="checkbox" id="mk-numbered"> 일련번호(No. 0001) 인쇄본으로 만들기</label>
+        <div id="mk-numopts" hidden>
+      <div class="mk-f"><div class="mk-l">부수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-copies-m" aria-label="부수 줄이기">&minus;</button><input id="mk-copies" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-copies-p" aria-label="부수 늘리기">+</button></div></div>
+      <div class="mk-f"><div class="mk-l">시작 번호</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-start-m" aria-label="시작 번호 줄이기">&minus;</button><input id="mk-start" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-start-p" aria-label="시작 번호 늘리기">+</button></div></div>
+          <p class="mut small">학생 1명 분량(전체 쪽)이 한 세트이고 세트마다 번호가 찍힙니다. 번호를 비워 두지 않고 이어서 발행하도록 이 양식의 다음 번호를 기억해 둡니다.</p>
+        </div>
+        <p class="mut small" style="margin:6px 0 0">A4, 배율 100%(&ldquo;실제 크기&rdquo;)로 인쇄하세요. 복사기로 복사해도 됩니다.</p>
+      </div>
+      <div id="mk-result" class="mk-card" hidden>
+        <div id="mk-fileinfo" class="small" style="margin-bottom:8px;word-break:break-all"></div>
+        <div class="row"><a id="mk-open" class="mk-btn" target="_blank" rel="noopener">PDF 열기</a><a id="mk-save" class="mk-btn secondary">저장</a><button type="button" id="mk-share" class="secondary" hidden>공유</button></div>
+      </div>
+    </div>
+    <div class="mk-foot"><div id="mk-prog" class="small mut" hidden></div><button type="button" id="mk-go">PDF 만들기</button></div>
+  </div>
+</div>
 <div id="loading" class="loading"><div><b id="loadtitle">StreamOMR 불러오는 중</b><div id="loadmsg" class="mut"></div></div></div>
 <script type="text/plain" id="worker-src">/*__WORKER__*/</script>
+<script>/*__SHEET__*/</script>
 <script>
 'use strict';
 /*__APP__*/
+/*__MAKER__*/
 /*__DEVJS__*/
 </script>
 </body></html>

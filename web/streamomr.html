@@ -55,6 +55,30 @@ input[type=number], input[type=text] { max-width:100%; }
 .badge.needs_review { background:#f0d54a; }
 
 ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
+
+.mk { position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.6); display:flex; justify-content:center; align-items:flex-end; }
+.mk[hidden] { display:none; }
+.mk-win { background:var(--bg); width:100%; max-width:560px; height:100%; max-height:100dvh; display:flex; flex-direction:column; }
+@media (min-width:700px) { .mk { align-items:center; } .mk-win { height:92vh; border-radius:14px; overflow:hidden; } }
+.mk-bar { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; padding-top:max(10px, env(safe-area-inset-top)); border-bottom:1px solid #2a313b; font-size:17px; }
+.mk-bar button { width:44px; height:44px; padding:0; font-size:18px; }
+.mk-body { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px; overscroll-behavior:contain; }
+.mk-card { background:var(--card); border-radius:12px; padding:12px 14px; margin:0 0 12px; }
+.mk-card .mk-f:first-child { margin-top:0; } .mk-card .mk-f:last-child { margin-bottom:0; }
+.mk-f { display:block; margin:10px 0; } .mk-l { color:var(--fg); margin-bottom:4px; }
+.mk input[type=text], .mk input[type=number], .mk select { width:100%; font-size:16px; min-height:44px; }
+.mk-st { display:flex; gap:8px; } .mk-st input { text-align:center; flex:1; min-width:0; }
+.mk-st button { width:52px; min-height:44px; padding:0; font-size:22px; line-height:1; }
+.mk-adv summary { min-height:32px; cursor:pointer; font-weight:600; }
+.mk-chk { display:flex; gap:10px; align-items:center; margin:0; color:var(--fg); min-height:44px; }
+.mk-chk input { width:22px; height:22px; }
+#mk-tabs button { padding:6px 14px; min-height:36px; } #mk-tabs button.on { background:#2b6cb0; border-color:#2b6cb0; }
+#mk-pvbox { background:#fff; border-radius:6px; padding:0; line-height:0; } #mk-pv { width:100%; height:auto; display:block; border-radius:6px; }
+.mk-foot { padding:10px 12px; padding-bottom:max(10px, env(safe-area-inset-bottom)); border-top:1px solid #2a313b; background:var(--bg); }
+.mk-foot button { width:100%; min-height:50px; font-size:17px; font-weight:700; } .mk-foot button:disabled { opacity:.5; }
+.mk-foot .small { margin-bottom:6px; }
+.mk-btn { display:inline-block; padding:12px 18px; min-height:44px; border-radius:8px; background:#2b6cb0; color:#fff; text-decoration:none; font-weight:600; }
+.mk-btn.secondary { background:#2a313b; }
 </style></head>
 <body>
 <div class="scan">
@@ -64,6 +88,7 @@ ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
       <button id="start" disabled>시작</button>
       <button id="torch" class="secondary" hidden>플래시</button>
       <button id="reset" class="secondary">초기화</button>
+      <button id="make" class="secondary">시험지 만들기</button>
     </div>
     <div class="stage" id="stage">
       <video id="video" playsinline muted autoplay></video>
@@ -78,6 +103,57 @@ ul.scans li { cursor:pointer; } ul.scans li:active { background:#232a33; }
     <h1>최근 스캔</h1>
     <div class="row" style="margin-bottom:8px"><button id="csv" class="secondary" disabled>CSV 다운로드</button><span class="mut small" id="count">0건</span></div>
     <ul class="scans" id="recent"></ul>
+  </div>
+</div>
+<div id="mk" class="mk" hidden role="dialog" aria-modal="true" aria-label="시험지 만들기">
+  <div class="mk-win">
+    <div class="mk-bar"><b>시험지 만들기</b><button type="button" id="mk-x" class="secondary" aria-label="닫기">&#10005;</button></div>
+    <div class="mk-body">
+      <div class="mk-card">
+        <label class="mk-f"><div class="mk-l">제목 <span class="mut small">시트에 인쇄 (선택)</span></div><input id="mk-title" type="text" enterkeyhint="done" placeholder="예: 2026 1학기 중간고사"></label>
+      <div class="mk-f"><div class="mk-l">문항 수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-questions-m" aria-label="문항 수 줄이기">&minus;</button><input id="mk-questions" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-questions-p" aria-label="문항 수 늘리기">+</button></div></div>
+      <div class="mk-f"><div class="mk-l">선지 수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-choices-m" aria-label="선지 수 줄이기">&minus;</button><input id="mk-choices" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-choices-p" aria-label="선지 수 늘리기">+</button></div></div>
+      </div>
+      <div class="mk-card">
+      <div class="mk-f"><div class="mk-l">수험번호 자릿수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-id_digits-m" aria-label="수험번호 자릿수 줄이기">&minus;</button><input id="mk-id_digits" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-id_digits-p" aria-label="수험번호 자릿수 늘리기">+</button></div></div>
+      <div class="mk-f"><div class="mk-l">과목코드 자릿수<span class="mut small"> 0 = 없음</span></div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-subject_digits-m" aria-label="과목코드 자릿수 줄이기">&minus;</button><input id="mk-subject_digits" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-subject_digits-p" aria-label="과목코드 자릿수 늘리기">+</button></div></div>
+      </div>
+      <details class="mk-card mk-adv"><summary>고급 설정</summary>
+      <div class="mk-f"><div class="mk-l">실제 사용 문항<span class="mut small"> 쓰지 않는 문항은 인쇄·인식 안 함</span></div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-used-m" aria-label="실제 사용 문항 줄이기">&minus;</button><input id="mk-used" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="전부"><button type="button" class="secondary" id="mk-used-p" aria-label="실제 사용 문항 늘리기">+</button></div></div>
+      <div class="mk-f"><div class="mk-l">쪽수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-pages-m" aria-label="쪽수 줄이기">&minus;</button><input id="mk-pages" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="자동"><button type="button" class="secondary" id="mk-pages-p" aria-label="쪽수 늘리기">+</button></div></div>
+
+        <div class="mk-f"><div class="mk-l">선지 표시</div><select id="mk-labels"><option value="1">1 2 3 4 5</option><option value="A">A B C D E</option><option value="a">a b c d e</option><option value="가">가 나 다 라 마</option></select></div>
+        <div class="mk-f"><div class="mk-l">버블 크기 <span class="mut small">mm</span></div><select id="mk-bubble"><option>4</option><option>4.25</option><option>4.5</option><option>4.75</option><option>5</option><option>5.25</option><option>5.5</option><option>5.75</option></select></div>
+      </details>
+      <div id="mk-err" class="err mk-card" hidden></div>
+      <div class="mk-card">
+        <div id="mk-info" class="small"></div>
+        <div id="mk-tabs" class="row" style="margin:8px 0"></div>
+        <div id="mk-pvbox"><canvas id="mk-pv" aria-label="미리보기"></canvas></div>
+      </div>
+      <div class="mk-card">
+        <label class="mk-chk"><input type="checkbox" id="mk-numbered"> 일련번호(No. 0001) 인쇄본으로 만들기</label>
+        <div id="mk-numopts" hidden>
+      <div class="mk-f"><div class="mk-l">부수</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-copies-m" aria-label="부수 줄이기">&minus;</button><input id="mk-copies" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-copies-p" aria-label="부수 늘리기">+</button></div></div>
+      <div class="mk-f"><div class="mk-l">시작 번호</div>
+        <div class="mk-st"><button type="button" class="secondary" id="mk-start-m" aria-label="시작 번호 줄이기">&minus;</button><input id="mk-start" type="number" inputmode="numeric" pattern="[0-9]*" placeholder=""><button type="button" class="secondary" id="mk-start-p" aria-label="시작 번호 늘리기">+</button></div></div>
+          <p class="mut small">학생 1명 분량(전체 쪽)이 한 세트이고 세트마다 번호가 찍힙니다. 번호를 비워 두지 않고 이어서 발행하도록 이 양식의 다음 번호를 기억해 둡니다.</p>
+        </div>
+        <p class="mut small" style="margin:6px 0 0">A4, 배율 100%(&ldquo;실제 크기&rdquo;)로 인쇄하세요. 복사기로 복사해도 됩니다.</p>
+      </div>
+      <div id="mk-result" class="mk-card" hidden>
+        <div id="mk-fileinfo" class="small" style="margin-bottom:8px;word-break:break-all"></div>
+        <div class="row"><a id="mk-open" class="mk-btn" target="_blank" rel="noopener">PDF 열기</a><a id="mk-save" class="mk-btn secondary">저장</a><button type="button" id="mk-share" class="secondary" hidden>공유</button></div>
+      </div>
+    </div>
+    <div class="mk-foot"><div id="mk-prog" class="small mut" hidden></div><button type="button" id="mk-go">PDF 만들기</button></div>
   </div>
 </div>
 <div id="loading" class="loading"><div><b id="loadtitle">StreamOMR 불러오는 중</b><div id="loadmsg" class="mut"></div></div></div>
@@ -6592,6 +6668,989 @@ self.onmessage = function (e) {
   } else if (m.type === 'reset' && scanner) scanner.reset();
 };
 </script>
+<script>// Small helpers that reproduce Python / numpy semantics the logic modules rely on.
+(function (O) {
+'use strict';
+
+// Python round(x, n): correctly rounded on the exact binary value, exact ties go to the even neighbour
+// (Number.prototype.toFixed rounds an exact tie up, which differs only there).
+function pyRound(x, n) {
+  if (!isFinite(x)) return x;
+  if (n === undefined) return pyRoundInt(x);
+  var s = Math.pow(2, n + 1), y = Math.abs(x) * s;      // x*2^(n+1) is an odd integer  <=>  x*10^n is exactly k+0.5
+  if (Number.isInteger(y) && y % 2 === 1) {
+    var p = Math.abs(x) * Math.pow(10, n), j = Math.floor(p);
+    if (j % 2 === 1) j += 1;
+    return Number((x < 0 ? '-' : '') + j + 'e-' + n);
+  }
+  return Number(x.toFixed(n));
+}
+// Python round(x) -> integer, half to even
+function pyRoundInt(x) {
+  var f = Math.floor(x), d = x - f;
+  if (d < 0.5) return f;
+  if (d > 0.5) return f + 1;
+  return f % 2 === 0 ? f : f + 1;
+}
+
+// SHA-1 of a string (UTF-8) as lowercase hex
+function sha1hex(str) {
+  var bytes = [];
+  for (var i = 0; i < str.length; i++) {
+    var c = str.codePointAt(i);
+    if (c > 0xFFFF) i++;
+    if (c < 0x80) bytes.push(c);
+    else if (c < 0x800) bytes.push(0xC0 | c >> 6, 0x80 | c & 63);
+    else if (c < 0x10000) bytes.push(0xE0 | c >> 12, 0x80 | c >> 6 & 63, 0x80 | c & 63);
+    else bytes.push(0xF0 | c >> 18, 0x80 | c >> 12 & 63, 0x80 | c >> 6 & 63, 0x80 | c & 63);
+  }
+  var bl = bytes.length;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  var hi = Math.floor(bl * 8 / 4294967296), lo = (bl * 8) >>> 0;
+  bytes.push(hi >>> 24, hi >>> 16 & 255, hi >>> 8 & 255, hi & 255, lo >>> 24, lo >>> 16 & 255, lo >>> 8 & 255, lo & 255);
+  var h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0, w = new Array(80);
+  function rol(v, s) { return (v << s | v >>> (32 - s)) >>> 0; }
+  for (var o = 0; o < bytes.length; o += 64) {
+    for (var t = 0; t < 16; t++) w[t] = (bytes[o + 4 * t] << 24 | bytes[o + 4 * t + 1] << 16 | bytes[o + 4 * t + 2] << 8 | bytes[o + 4 * t + 3]) >>> 0;
+    for (t = 16; t < 80; t++) w[t] = rol(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16], 1);
+    var a = h0, b = h1, c = h2, d = h3, e = h4;
+    for (t = 0; t < 80; t++) {
+      var f, k;
+      if (t < 20) { f = b & c | ~b & d; k = 0x5A827999; }
+      else if (t < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; }
+      else if (t < 60) { f = b & c | b & d | c & d; k = 0x8F1BBCDC; }
+      else { f = b ^ c ^ d; k = 0xCA62C1D6; }
+      var tmp = (rol(a, 5) + (f >>> 0) + e + k + w[t]) >>> 0;
+      e = d; d = c; c = rol(b, 30); b = a; a = tmp;
+    }
+    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0; h4 = (h4 + e) >>> 0;
+  }
+  return [h0, h1, h2, h3, h4].map(function (v) { return ('00000000' + v.toString(16)).slice(-8); }).join('');
+}
+
+// deep equality of plain JSON-like values (arrays, objects, primitives); NaN equals NaN
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (typeof a === 'number' && typeof b === 'number') return a !== a && b !== b;
+  if (a == null || b == null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  var ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (var i = 0; i < ka.length; i++) if (!deepEqual(a[ka[i]], b[ka[i]])) return false;
+  return true;
+}
+
+O.util = { pyRound: pyRound, pyRoundInt: pyRoundInt, sha1hex: sha1hex, deepEqual: deepEqual };
+})(globalThis.OMR = globalThis.OMR || {});
+
+// omr/markers.py: ArUco corner markers (ids, bit patterns) and the metadata / serial / header bit-strip codecs.
+(function (O) {
+'use strict';
+var U = O.util;
+
+var ARUCO_DICT_NAME = 'DICT_4X4_50';
+var MAX_PAGES = 12;                              // 4 ids per page, 50 ids in the dictionary -> 12 pages
+var CORNERS = ['TL', 'TR', 'BR', 'BL'];          // id offsets 0..3
+
+var META_FORM_BITS = 16, META_PAGE_BITS = 4, META_TOTAL_BITS = 4, META_CRC_BITS = 8;
+var START_GUARD = [true, false, true, false];
+var STOP_GUARD = [false, true, false, true];
+var META_CELLS = START_GUARD.length + META_FORM_BITS + META_PAGE_BITS + META_TOTAL_BITS + META_CRC_BITS + STOP_GUARD.length;
+
+// cv2.aruco DICT_4X4_50 marker patterns incl. the black border, exported from cv2 (generateImageMarker, 6x6, row-major, 1 = black)
+var MARKER_BITS = ["111111101001110101111001111011111111", "111111111111100001101101101011111111", "111111111001111001111011100101111111", "111111101101101101110111110011111111", "111111110101110111101101100011111111", "111111110001101101100111100101111111", "111111101101100011111011100011111111", "111111100111110111100001111011111111", "111111100001100011100101101011111111", "111111100111100001110101110011111111", "111111100001101101101101111101111111", "111111111101111101101011110001111111", "111111111111100011101001110001111111", "111111111011101011111111100001111111", "111111111011110111101001111101111111", "111111111011110011111001100011111111", "111111110111110011110011110101111111", "111111110011110011111111111111111111", "111111110011100111110101100011111111", "111111110001110011101011100001111111", "111111101111110011101111101001111111", "111111101001111111111011101001111111", "111111100111100111100101110101111111", "111111100101100101101111111011111111", "111111100001100011110111110001111111", "111111101101110111110001111101111111", "111111101011100111100011110111111111", "111111101011110101110101110111111111", "111111111011111101111011111001111111", "111111111001110111110011100001111111", "111111110111110111111101110101111111", "111111110101110001101001111011111111", "111111101101100011100111100001111111", "111111100001111111100111101001111111", "111111111111101111101011100011111111", "111111111111101101111011101101111111", "111111111101101111110001110101111111", "111111111111110111100001100001111111", "111111111111100101100001110011111111", "111111111101100111110101101011111111", "111111111101110001111101101111111111", "111111111011101011111011101111111111", "111111111001111011101111100111111111", "111111111001101111101001111011111111", "111111111011110111100011101111111111", "111111111011100011100011101001111111", "111111111011100101111001100001111111", "111111110111101001110011110111111111", "111111110101111111111011100011111111", "111111110101111111111101111001111111"];
+
+function markerId(page, corner) {        // omr/markers.py:27
+  if (!(page >= 0 && page < MAX_PAGES)) throw new Error('page index ' + page + ' out of range 0..' + (MAX_PAGES - 1));
+  return 4 * page + CORNERS.indexOf(corner);
+}
+
+function decodeMarkerId(mid) {           // omr/markers.py:33 -> [page, corner]
+  if (!(mid >= 0 && mid < 4 * MAX_PAGES)) throw new Error('marker id ' + mid);
+  return [Math.floor(mid / 4), CORNERS[mid % 4]];
+}
+
+// omr/markers.py:40: Marker pattern incl. black border as 6 rows of 6 booleans, true = black
+function markerBits(mid) {
+  var s = MARKER_BITS[mid], out = [];
+  for (var r = 0; r < 6; r++) {
+    var row = [];
+    for (var c = 0; c < 6; c++) row.push(s.charAt(r * 6 + c) === '1');
+    out.push(row);
+  }
+  return out;
+}
+
+// omr/markers.py:47: grey image {w, h, data: Uint8Array} of the marker with a white quiet zone (in marker cells)
+function markerImage(mid, px, quietCells) {
+  px = px === undefined ? 200 : px; quietCells = quietCells === undefined ? 1 : quietCells;
+  var bits = markerBits(mid), k = bits.length;
+  var cell = Math.max(1, Math.floor(px / k)), q = quietCells * cell, n = k * cell + 2 * q;
+  var data = new Uint8Array(n * n).fill(255);
+  for (var r = 0; r < k; r++) for (var c = 0; c < k; c++) {
+    if (!bits[r][c]) continue;
+    for (var y = 0; y < cell; y++) for (var x = 0; x < cell; x++) data[(q + r * cell + y) * n + q + c * cell + x] = 0;
+  }
+  return { w: n, h: n, data: data };
+}
+
+// ---------------------------------------------------------------- metadata strip
+function crc8(data, poly) {              // omr/markers.py:68
+  poly = poly === undefined ? 0x07 : poly;
+  var crc = 0;
+  for (var i = 0; i < data.length; i++) {
+    crc ^= data[i];
+    for (var j = 0; j < 8; j++) crc = (crc & 0x80) ? (((crc << 1) ^ poly) & 0xFF) : ((crc << 1) & 0xFF);
+  }
+  return crc;
+}
+
+function payloadBytes(formId, page, totalPages) {
+  return [formId >> 8, formId & 0xFF, (page << 4) | totalPages];
+}
+
+function intBits(v, n) {                 // big-endian bits of v
+  var out = [];
+  for (var i = 0; i < n; i++) out.push(Math.floor(v / Math.pow(2, n - 1 - i)) % 2 === 1);
+  return out;
+}
+
+function bitsInt(bits) {
+  var v = 0;
+  for (var i = 0; i < bits.length; i++) v = v * 2 + (bits[i] ? 1 : 0);
+  return v;
+}
+
+function encodeMeta(formId, page, totalPages) {      // omr/markers.py:98
+  if (!(formId >= 0 && formId < (1 << META_FORM_BITS))) throw new Error('form_id must be 16 bit');
+  if (!(totalPages >= 1 && totalPages <= MAX_PAGES)) throw new Error('total_pages must be 1..' + MAX_PAGES);
+  if (!(page >= 0 && page < totalPages)) throw new Error('page must be in 0..total_pages-1');
+  var crc = crc8(payloadBytes(formId, page, totalPages));
+  return START_GUARD.concat(intBits(formId, META_FORM_BITS), intBits(page, META_PAGE_BITS), intBits(totalPages, META_TOTAL_BITS),
+    intBits(crc, META_CRC_BITS), STOP_GUARD);
+}
+
+function eqBits(a, b) {
+  if (a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// omr/markers.py:110: Decode META_CELLS bits (true = black) -> {form_id, page, total_pages} or null on guard/checksum/range failure
+function decodeMeta(bits) {
+  bits = Array.prototype.map.call(bits, Boolean);
+  if (bits.length !== META_CELLS) return null;
+  var g = START_GUARD.length;
+  if (!eqBits(bits.slice(0, g), START_GUARD) || !eqBits(bits.slice(bits.length - STOP_GUARD.length), STOP_GUARD)) return null;
+  var i = g;
+  var form = bitsInt(bits.slice(i, i + META_FORM_BITS)); i += META_FORM_BITS;
+  var page = bitsInt(bits.slice(i, i + META_PAGE_BITS)); i += META_PAGE_BITS;
+  var total = bitsInt(bits.slice(i, i + META_TOTAL_BITS)); i += META_TOTAL_BITS;
+  var crc = bitsInt(bits.slice(i, i + META_CRC_BITS));
+  if (crc !== crc8(payloadBytes(form, page, total))) return null;
+  if (!(total >= 1 && total <= MAX_PAGES && page < total)) return null;
+  return { form_id: form, page: page, total_pages: total };
+}
+
+// ---------------------------------------------------------------- serial strip (per printed copy)
+var SERIAL_BITS = 12;
+var SERIAL_MAX = (1 << SERIAL_BITS) - 1;     // 4095; 0 = "no serial"
+var SERIAL_CRC_BITS = 8;
+var SERIAL_CELLS = START_GUARD.length + SERIAL_BITS + SERIAL_CRC_BITS + STOP_GUARD.length;
+var SERIAL_TAG = 0x5A;                       // domain separation from the meta strip's CRC
+
+function serialPayload(serial) { return [SERIAL_TAG, serial >> 8, serial & 0xFF]; }
+
+function encodeSerial(serial) {              // omr/markers.py:150
+  if (!(serial >= 1 && serial <= SERIAL_MAX)) throw new Error('serial must be 1..' + SERIAL_MAX);
+  return START_GUARD.concat(intBits(serial, SERIAL_BITS), intBits(crc8(serialPayload(serial)), SERIAL_CRC_BITS), STOP_GUARD);
+}
+
+function decodeSerial(bits) {                // omr/markers.py:157 -> serial or null
+  bits = Array.prototype.map.call(bits, Boolean);
+  if (bits.length !== SERIAL_CELLS) return null;
+  var g = START_GUARD.length;
+  if (!eqBits(bits.slice(0, g), START_GUARD) || !eqBits(bits.slice(bits.length - STOP_GUARD.length), STOP_GUARD)) return null;
+  var v = bitsInt(bits.slice(g, g + SERIAL_BITS));
+  var crc = bitsInt(bits.slice(g + SERIAL_BITS, g + SERIAL_BITS + SERIAL_CRC_BITS));
+  if (v === 0 || crc !== crc8(serialPayload(v))) return null;
+  return v;
+}
+
+// ---------------------------------------------------------------- self-describing header (format v1 / v2)
+var HEADER_VERSIONS = [1, 2];      // 1: plain sheet; 2: also printed with timing tracks
+var HEADER_VERSION = 2;            // what new sheets are printed as
+var HEADER_START_GUARD = [true, true, false, true];
+var HEADER_STOP_GUARD = [true, false, true, true];
+var HEADER_ROWS = 2;
+var HEADER_ROW_DATA = 32;
+var HEADER_ROW_CELLS = HEADER_START_GUARD.length + HEADER_ROW_DATA + HEADER_STOP_GUARD.length;
+var LABEL_STYLES = ['1', 'A', 'a', '가'];            // choice labels "1 2 3 ..", "A B C ..", "a b c ..", "가 나 다 .."
+var HANGUL_LABELS = '가나다라마바사아자차';    // 가나다라마바사아자차
+var BUBBLE_BASE_MM = 4.0, BUBBLE_STEP_MM = 0.25;         // min bubble = base + step * class (class 0..7)
+var HEADER_FIELDS = [['version', 3], ['questions', 10], ['used', 10], ['choices', 4], ['id_digits', 4],
+  ['subject_digits', 2], ['pages', 4], ['page', 4], ['labels', 2], ['bubble', 3], ['reserved', 2]];
+var HEADER_PAYLOAD_BITS = HEADER_FIELDS.reduce(function (s, f) { return s + f[1]; }, 0);
+if (HEADER_PAYLOAD_BITS + 16 !== HEADER_ROWS * HEADER_ROW_DATA) throw new Error('header layout');
+// the whitening pattern is numpy default_rng(0x0A11CE).integers(0, 2, 64), exported from Python
+var WHITEN = '0011000101001100101011011100011011100011001011010011011010010011'.split('').map(function (c) { return c === '1'; });
+var HEADER_TAG = [0x4F, 0x4D, 0x52, 0x31];               // b"OMR1": domain separation for the CRC
+
+// Header = plain object with the dataclass fields (questions, used, choices, id_digits, subject_digits, pages, page,
+// labels, bubble, version); form_key / choice_labels are the functions headerFormKey / headerChoiceLabels below.
+function Header(questions, used, choices, idDigits, subjectDigits, pages, page, labels, bubble, version) {
+  return { questions: questions, used: used, choices: choices, id_digits: idDigits, subject_digits: subjectDigits,
+    pages: pages, page: page, labels: labels === undefined ? 0 : labels, bubble: bubble === undefined ? 0 : bubble,
+    version: version === undefined ? HEADER_VERSION : version };
+}
+
+// Identity of the printed form (everything but the page index): equal on every page of one form.
+function headerFormKey(h) {
+  return 'Q' + h.questions + 'U' + h.used + 'C' + h.choices + 'D' + h.id_digits + 'S' + h.subject_digits +
+    'P' + h.pages + 'L' + h.labels + 'B' + h.bubble + 'V' + h.version;
+}
+
+function headerChoiceLabels(h) { return choiceLabels(h.labels, h.choices); }
+
+function choiceLabels(style, n) {            // omr/markers.py:216
+  var s = LABEL_STYLES[style], out = [], i;
+  if (s === '1') { for (i = 0; i < n; i++) out.push(String(i + 1)); return out; }
+  if (s === '가') return HANGUL_LABELS.slice(0, n).split('');
+  for (i = 0; i < n; i++) out.push(String.fromCharCode(s.charCodeAt(0) + i));
+  return out;
+}
+
+function labelStyle(labels) {                // omr/markers.py:226: style index or null
+  for (var i = 0; i < LABEL_STYLES.length; i++) {
+    if (labels.length <= (LABEL_STYLES[i] === '가' ? HANGUL_LABELS.length : 26) && eqBits(choiceLabels(i, labels.length), labels)) return i;
+  }
+  return null;
+}
+
+function crc16(data, poly, init) {           // CRC-16/CCITT-FALSE
+  poly = poly === undefined ? 0x1021 : poly; init = init === undefined ? 0xFFFF : init;
+  var crc = init;
+  for (var i = 0; i < data.length; i++) {
+    crc ^= data[i] << 8;
+    for (var j = 0; j < 8; j++) crc = (crc & 0x8000) ? (((crc << 1) ^ poly) & 0xFFFF) : ((crc << 1) & 0xFFFF);
+  }
+  return crc;
+}
+
+function headerPayload(h) {
+  var out = [];
+  for (var i = 0; i < HEADER_FIELDS.length; i++) {
+    var name = HEADER_FIELDS[i][0], n = HEADER_FIELDS[i][1], v = name === 'reserved' ? 0 : h[name];
+    if (!(v >= 0 && v < Math.pow(2, n))) throw new Error('header field ' + name + '=' + v + ' does not fit in ' + n + ' bits');
+    out = out.concat(intBits(v, n));
+  }
+  return out;
+}
+
+function bitsBytes(bits) {
+  bits = bits.slice();
+  while (bits.length % 8) bits.push(false);
+  var out = [];
+  for (var i = 0; i < bits.length; i += 8) out.push(bitsInt(bits.slice(i, i + 8)));
+  return out;
+}
+
+function validateHeader(h) {                 // omr/markers.py:268
+  if (HEADER_VERSIONS.indexOf(h.version) < 0) throw new Error('unsupported header version ' + h.version);
+  if (!(h.used >= 1 && h.used <= h.questions)) throw new Error('used must be 1..questions');
+  if (!(h.choices >= 2 && h.choices <= 10) || !(h.id_digits >= 1 && h.id_digits <= 12) || !(h.subject_digits >= 0 && h.subject_digits <= 3))
+    throw new Error('choices / id_digits / subject_digits out of range');
+  if (!(h.pages >= 1 && h.pages <= MAX_PAGES) || !(h.page >= 0 && h.page < h.pages)) throw new Error('pages / page out of range');
+  if (h.labels >= LABEL_STYLES.length || !(h.bubble >= 0 && h.bubble < 8)) throw new Error('labels / bubble out of range');
+}
+
+function encodeHeader(h) {                   // omr/markers.py:281: rows of cells (true = black), guards included
+  validateHeader(h);
+  var pay = headerPayload(h);
+  var data = pay.concat(intBits(crc16(HEADER_TAG.concat(bitsBytes(pay))), 16));
+  data = data.map(function (b, i) { return b !== WHITEN[i]; });
+  var rows = [];
+  for (var r = 0; r < HEADER_ROWS; r++) rows.push(HEADER_START_GUARD.concat(data.slice(r * HEADER_ROW_DATA, (r + 1) * HEADER_ROW_DATA), HEADER_STOP_GUARD));
+  return rows;
+}
+
+// omr/markers.py:292: 64 data bits (guards stripped, still whitened) -> Header, or null on CRC / range failure
+function decodeHeaderData(data) {
+  data = Array.prototype.map.call(data, Boolean);
+  if (data.length !== HEADER_ROWS * HEADER_ROW_DATA) return null;
+  data = data.map(function (b, i) { return b !== WHITEN[i]; });
+  var pay = data.slice(0, HEADER_PAYLOAD_BITS), crc = bitsInt(data.slice(HEADER_PAYLOAD_BITS));
+  if (crc !== crc16(HEADER_TAG.concat(bitsBytes(pay)))) return null;
+  var vals = {}, i = 0;
+  for (var k = 0; k < HEADER_FIELDS.length; k++) {
+    vals[HEADER_FIELDS[k][0]] = bitsInt(pay.slice(i, i + HEADER_FIELDS[k][1]));
+    i += HEADER_FIELDS[k][1];
+  }
+  if (vals.reserved !== 0) return null;
+  var h = Header(vals.questions, vals.used, vals.choices, vals.id_digits, vals.subject_digits, vals.pages, vals.page,
+    vals.labels, vals.bubble, vals.version);
+  try { validateHeader(h); } catch (e) { return null; }
+  return h;
+}
+
+function decodeHeader(rows) {                // omr/markers.py:310: rows of cells (guards included) -> Header or null
+  var g0 = HEADER_START_GUARD.length, g1 = HEADER_STOP_GUARD.length, data = [];
+  for (var r = 0; r < rows.length; r++) {
+    var row = Array.prototype.map.call(rows[r], Boolean);
+    if (row.length !== HEADER_ROW_CELLS || !eqBits(row.slice(0, g0), HEADER_START_GUARD) || !eqBits(row.slice(row.length - g1), HEADER_STOP_GUARD)) return null;
+    data = data.concat(row.slice(g0, row.length - g1));
+  }
+  return decodeHeaderData(data);
+}
+
+O.markers = {
+  ARUCO_DICT_NAME: ARUCO_DICT_NAME, MAX_PAGES: MAX_PAGES, CORNERS: CORNERS, META_CELLS: META_CELLS, MARKER_BITS: MARKER_BITS,
+  SERIAL_BITS: SERIAL_BITS, SERIAL_MAX: SERIAL_MAX, SERIAL_CELLS: SERIAL_CELLS, SERIAL_CRC_BITS: SERIAL_CRC_BITS,
+  START_GUARD: START_GUARD, STOP_GUARD: STOP_GUARD, HEADER_VERSIONS: HEADER_VERSIONS, HEADER_VERSION: HEADER_VERSION,
+  HEADER_START_GUARD: HEADER_START_GUARD, HEADER_STOP_GUARD: HEADER_STOP_GUARD, HEADER_ROWS: HEADER_ROWS,
+  HEADER_ROW_DATA: HEADER_ROW_DATA, HEADER_ROW_CELLS: HEADER_ROW_CELLS, LABEL_STYLES: LABEL_STYLES,
+  BUBBLE_BASE_MM: BUBBLE_BASE_MM, BUBBLE_STEP_MM: BUBBLE_STEP_MM,
+  markerId: markerId, decodeMarkerId: decodeMarkerId, markerBits: markerBits, markerImage: markerImage,
+  crc8: crc8, crc16: crc16, encodeMeta: encodeMeta, decodeMeta: decodeMeta, encodeSerial: encodeSerial, decodeSerial: decodeSerial,
+  Header: Header, headerFormKey: headerFormKey, headerChoiceLabels: headerChoiceLabels, choiceLabels: choiceLabels,
+  labelStyle: labelStyle, validateHeader: validateHeader, encodeHeader: encodeHeader, decodeHeaderData: decodeHeaderData,
+  decodeHeader: decodeHeader
+};
+})(globalThis.OMR = globalThis.OMR || {});
+
+// omr/layout.py: template params -> Layout.  All coordinates in mm, page-relative, origin top-left.
+// The Layout is the single source of truth for both the PDF renderer and the recognizer.  Rect = [x, y, w, h].
+// Text y is the baseline.  Layout objects are plain objects with the Python dataclass field names (snake_case).
+(function (O) {
+'use strict';
+var mk = O.markers, pyRound = O.util.pyRound;
+
+// ------------------------------------------------------------------ design constants
+var PAGE_W = 210.0, PAGE_H = 297.0;
+var MARGIN = 8.0;
+var MARKER_MM = 16.0;
+var QUIET_MM = 3.0;
+var META_CELL_W = 3.6, META_CELL_H = 4.5, META_Y = 9.0;     // legacy single-row meta strip (form id only)
+var HEADER_CELL_W = 3.6, HEADER_ROW_H = 4.0;                // self-describing header: 2 rows
+var HEADER_ROW_Y = [8.0, 13.5];                             // 1.5 mm white gap between rows (and above / below): local paper level
+var TITLE_Y = 23.5;
+var SUBJ_GAP = 7.0;                                         // ID grid -> subject grid (room for its row labels)
+var SERIAL_CELL_W = 3.6, SERIAL_CELL_H = 4.5, SERIAL_Y = 275.0;   // footer strip, right end kept clear of the BR marker
+var SERIAL_CLEARANCE = 6.0;   // mm between the strip / "No." label and the marker squares (ink spread, blur)
+var INFO_TOP = 30.0;
+var PAD = 3.0;
+var FRAME_INSET = 0.25;       // keeps frame strokes inside the margin
+// ---- timing tracks (header version 2): rows of small black squares along the four edges, outside the frames.  A
+// folded / curled sheet is not flat: the recognizer measures where each tick really is and bends the page back.
+var TRACK_PITCH = 6.0;                  // mm between tick centres
+var TRACK_LEN = 3.0, TRACK_LR_W = 2.4, TRACK_TB_H = 2.4;   // tick size along the track, across it (left / right), across it (top / bottom)
+var TRACK_EDGE_LR = 6.0, TRACK_EDGE_TB = 4.4;              // distance of the ticks from the paper edge (printers clip ~3 mm)
+var TRACK_N_LR = 40, TRACK_N_TB = 26;                      // ticks per left / right edge, per top / bottom edge
+var FRAME_INSET_TRACKS = 1.4;           // frames start this far inside the margin when tracks are printed (clear of the left / right ticks)
+var ID_WRITEIN_H = 7.0;
+var ID_ROW_LABEL_W = 5.0;
+var NAME_BOX_H = 25.0;
+var ANS_HEADER_H = 6.0;
+var ANS_GAP = 3.0;
+var QNUM_W = 8.0;
+var MIN_PITCH = 5.5;
+var MAX_PITCH = 7.5;
+var MAX_BUBBLE = 6.0;
+var BAND_ROWS = 5;
+var MAX_CHOICES = 10, MAX_ID_DIGITS = 12;
+
+// Template (omr/layout.py:44): what a form looks like.  Everything that decides geometry is encoded in the sheet's header, so
+// a sheet can be read without knowing the template in advance; the texts (title, labels, instruction) are only printed.
+function Template(o) {
+  var t = {
+    questions: 45, choices: 5, id_digits: 8, pages: null, title: '', choice_labels: null, min_bubble_mm: 4.0, tracks: true,
+    used: null, subject_digits: 2, label_id: '수험번호', label_name: '성명', label_subject: '과목코드',
+    instruction: '보기 원 안을 진하게 완전히 칠하세요. 고칠 때는 깨끗이 지우세요.'
+  };
+  if (o) for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) t[k] = o[k];
+  return t;
+}
+
+function Text(text, x, y, sizePt, align, gray, kind) {
+  return { text: text, x: x, y: y, size_pt: sizePt, align: align === undefined ? 'l' : align, gray: gray === undefined ? 0.0 : gray,
+    kind: kind === undefined ? '' : kind };
+}
+
+// Python float floor division (a // b)
+function floorDiv(a, b) {
+  var mod = a % b, div = (a - mod) / b;
+  if (mod !== 0) { if ((b < 0) !== (mod < 0)) { mod += b; div -= 1; } }
+  var fl;
+  if (div !== 0) { fl = Math.floor(div); if (div - fl > 0.5) fl += 1; } else fl = 0;
+  return fl;
+}
+
+function _r(v) { return pyRound(Number(v), 3); }
+function _rect() { var out = []; for (var i = 0; i < arguments.length; i++) out.push(_r(arguments[i])); return out; }
+
+// Corner name -> [x, y, w, h] (mm) of the marker's black square for page index p.  Marker positions are fixed design
+// constants (independent of the template), so a recognizer can use them before it knows which form it is looking at.
+function markerRects(p) {                // omr/layout.py:206
+  var far = PAGE_W - MARGIN - MARKER_MM, low = PAGE_H - MARGIN - MARKER_MM;
+  var pos = { TL: [MARGIN, MARGIN], TR: [far, MARGIN], BR: [far, low], BL: [MARGIN, low] };
+  var out = {};
+  ['TL', 'TR', 'BR', 'BL'].forEach(function (c) { out[c] = [_r(pos[c][0]), _r(pos[c][1]), MARKER_MM, MARKER_MM]; });
+  return out;
+}
+
+function metaCellRects() {               // omr/layout.py:218
+  var n = mk.META_CELLS, mx = (PAGE_W - META_CELL_W * n) / 2, out = [];
+  for (var i = 0; i < n; i++) out.push(_rect(mx + i * META_CELL_W, META_Y, META_CELL_W, META_CELL_H));
+  return out;
+}
+
+// [row][cell] -> [x, y, w, h] (mm) of the self-describing header (template independent)
+function headerCellRects() {             // omr/layout.py:225
+  var n = mk.HEADER_ROW_CELLS, x0 = (PAGE_W - HEADER_CELL_W * n) / 2;
+  return HEADER_ROW_Y.map(function (y) {
+    var row = [];
+    for (var i = 0; i < n; i++) row.push(_rect(x0 + i * HEADER_CELL_W, y, HEADER_CELL_W, HEADER_ROW_H));
+    return row;
+  });
+}
+
+// Side -> [[x, y, w, h], ...] (mm) of the timing ticks (template independent; used when the header says version >= 2)
+function trackTickRects() {              // omr/layout.py:232
+  var out = {}, ys = [], xs = [], k;
+  for (k = 0; k < TRACK_N_LR; k++) ys.push((PAGE_H - (TRACK_N_LR - 1) * TRACK_PITCH) / 2 + k * TRACK_PITCH);
+  for (k = 0; k < TRACK_N_TB; k++) xs.push((PAGE_W - (TRACK_N_TB - 1) * TRACK_PITCH) / 2 + k * TRACK_PITCH);
+  [['L', TRACK_EDGE_LR], ['R', PAGE_W - TRACK_EDGE_LR - TRACK_LR_W]].forEach(function (s) {
+    out[s[0]] = ys.map(function (y) { return _rect(s[1], y - TRACK_LEN / 2, TRACK_LR_W, TRACK_LEN); });
+  });
+  [['T', TRACK_EDGE_TB], ['B', PAGE_H - TRACK_EDGE_TB - TRACK_TB_H]].forEach(function (s) {
+    out[s[0]] = xs.map(function (x) { return _rect(x - TRACK_LEN / 2, s[1], TRACK_LEN, TRACK_TB_H); });
+  });
+  return out;
+}
+
+// Side -> array of [cx, cy] tick centres (mm)  (Python: (n, 2) array)
+function trackTickCenters() {            // omr/layout.py:245
+  var rs = trackTickRects(), out = {};
+  Object.keys(rs).forEach(function (s) { out[s] = rs[s].map(function (r) { return [r[0] + r[2] / 2, r[1] + r[3] / 2]; }); });
+  return out;
+}
+
+function serialCellRects() {             // omr/layout.py:251
+  var n = mk.SERIAL_CELLS, x1 = PAGE_W - MARGIN - MARKER_MM - SERIAL_CLEARANCE, x0 = x1 - n * SERIAL_CELL_W, out = [];
+  for (var i = 0; i < n; i++) out.push(_rect(x0 + i * SERIAL_CELL_W, SERIAL_Y, SERIAL_CELL_W, SERIAL_CELL_H));
+  return out;
+}
+
+function pad4(n) { return ('0000' + n).slice(-4); }
+
+function serialLabel(serial) {           // omr/layout.py:258
+  var x1 = PAGE_W - MARGIN - MARKER_MM - SERIAL_CLEARANCE;
+  return Text('No. ' + pad4(serial), x1, 285.0, 9, 'r', 0.0, 'serial');
+}
+
+// ------------------------------------------------------------------ geometry
+function idGeometry(t) {                 // omr/layout.py:270 -> [dia, pitch_x, pitch_y]
+  var dia = Math.max(t.min_bubble_mm, 4.2);
+  return [dia, Math.max(6.2, dia * 1.45), Math.max(MIN_PITCH, dia * 1.3)];
+}
+
+function infoBottom(t) {
+  var py = idGeometry(t)[2];
+  return INFO_TOP + PAD + 5 + ID_WRITEIN_H + 2 + 10 * py + PAD;
+}
+
+function frameLeft(t) { return MARGIN + (t.tracks ? FRAME_INSET_TRACKS : FRAME_INSET); }
+
+function answerArea(t) {
+  var top = infoBottom(t) + 3.0, bottom = PAGE_H - MARGIN - MARKER_MM - QUIET_MM, left = frameLeft(t);
+  return [left, top, PAGE_W - 2 * left, bottom - top];
+}
+
+// Best [ncols, rows, pitch_x, pitch_y, col_w] for q questions on one page, or null
+function chooseGrid(t, q) {              // omr/layout.py:290
+  var area = answerArea(t), aw = area[2], ah = area[3];
+  var availH = ah - ANS_HEADER_H - 2.0, best = null;
+  for (var ncols = 1; ncols < (q > 0 ? q + 1 : 2); ncols++) {
+    var colW = (aw - (ncols - 1) * ANS_GAP) / ncols;
+    var px = Math.min(MAX_PITCH, (colW - QNUM_W) / t.choices);
+    var rows = Math.ceil(q / ncols);
+    var py = Math.min(MAX_PITCH, availH / rows);
+    if (px < MIN_PITCH || py < MIN_PITCH) continue;
+    var score = Math.min(px, py);
+    if (best === null || score > best[0] + 1e-9) best = [score, ncols, rows, px, py, colW];
+  }
+  return best ? best.slice(1) : null;
+}
+
+function pageCapacity(t) {               // omr/layout.py:307: max questions on one page at minimum pitch
+  var area = answerArea(t), aw = area[2], ah = area[3];
+  var availH = ah - ANS_HEADER_H - 2.0;
+  var rows = floorDiv(availH, MIN_PITCH);
+  var minCol = QNUM_W + t.choices * MIN_PITCH;
+  var ncols = floorDiv(aw + ANS_GAP, minCol + ANS_GAP);
+  return Math.max(0, rows * ncols);
+}
+
+function resolveSplit(t) {               // omr/layout.py:318: printed questions per page: an even split over the pages
+  var Q = t.questions, cap = pageCapacity(t), n;
+  if (cap < 1) throw new Error('no room for any question at minimum bubble size');
+  if (t.pages !== null && t.pages !== undefined) {
+    n = t.pages;
+    if (n < 1 || n > Q) throw new Error('invalid page count');
+    if (Math.ceil(Q / n) > cap) throw new Error(Q + ' questions in ' + n + ' pages exceeds capacity ' + cap + '/page');
+  } else {
+    n = Math.ceil(Q / cap);   // automatic split
+  }
+  var base = Math.floor(Q / n), extra = Q % n, out = [];
+  for (var i = 0; i < n; i++) out.push(base + (i < extra ? 1 : 0));
+  return out;
+}
+
+function bubbleClass(minBubbleMm) {      // omr/layout.py:337
+  var k = (minBubbleMm - mk.BUBBLE_BASE_MM) / mk.BUBBLE_STEP_MM;
+  if (Math.abs(k - Math.round(k)) > 1e-6 || !(Math.round(k) >= 0 && Math.round(k) < 8))
+    throw new Error('min_bubble_mm must be ' + mk.BUBBLE_BASE_MM + ' + k*' + mk.BUBBLE_STEP_MM + ' (k = 0..7)');
+  return Math.round(k);
+}
+
+function textWidthMm(s, sizePt) {        // omr/layout.py:344
+  var em = sizePt * 0.3528, w = 0;
+  Array.from(s).forEach(function (c) { w += em * (c.codePointAt(0) > 0x2E80 ? 1.0 : 0.55); });
+  return w;
+}
+
+function validate(t) {                   // omr/layout.py:349
+  if (t.questions < 1) throw new Error('questions must be >= 1');
+  if (!(t.choices >= 2 && t.choices <= MAX_CHOICES)) throw new Error('choices must be 2..' + MAX_CHOICES);
+  if (!(t.id_digits >= 1 && t.id_digits <= MAX_ID_DIGITS)) throw new Error('id_digits must be 1..' + MAX_ID_DIGITS);
+  if (t.choice_labels !== null && t.choice_labels !== undefined && t.choice_labels.length !== t.choices) throw new Error('choice_labels length must equal choices');
+  bubbleClass(t.min_bubble_mm);
+  if (t.questions >= (1 << 10)) throw new Error('questions must be < 1024');
+  if (t.used !== null && t.used !== undefined && !(t.used >= 1 && t.used <= t.questions)) throw new Error('used must be 1..questions');
+  if (!(t.subject_digits >= 0 && t.subject_digits <= 3)) throw new Error('subject_digits must be 0..3');
+  if (t.choice_labels !== null && t.choice_labels !== undefined && mk.labelStyle(Array.from(t.choice_labels)) === null)
+    throw new Error('choice_labels must be 1 2 3.., A B C.., a b c.. or 가 나 다.. (the header stores only the style)');
+}
+
+// The header of page `page` of layout L (omr/layout.py Layout.header)
+function layoutHeader(L, page) {
+  var t = L.template;
+  return mk.Header(t.questions, t.used || t.questions, t.choices, t.id_digits, t.subject_digits, L.total_pages,
+    page, mk.labelStyle(t.choice_labels), bubbleClass(t.min_bubble_mm), L.version || mk.HEADER_VERSION);
+}
+
+function buildLayout(template) {         // omr/layout.py:372
+  var t = Template(template);
+  if (typeof t.choice_labels === 'string') t.choice_labels = Array.from(t.choice_labels);
+  validate(t);
+  if (t.choice_labels === null || t.choice_labels === undefined) {
+    t.choice_labels = [];
+    for (var i = 0; i < t.choices; i++) t.choice_labels.push(String(i + 1));
+  }
+  var split = resolveSplit(t), total = split.length;
+  if (total > mk.MAX_PAGES) throw new Error(total + ' pages needed; max is ' + mk.MAX_PAGES);
+  var used = t.used || t.questions, sumButLast = 0;
+  for (i = 0; i < total - 1; i++) sumButLast += split[i];
+  if (used <= sumButLast) throw new Error('only ' + used + ' of ' + t.questions + ' questions used: page ' + total + ' would be empty (use fewer pages)');
+  t.pages = total;
+  var pages = [], first = 1, usedPP = [];
+  for (var p = 0; p < split.length; p++) {
+    var nq = split[p], nUsed = Math.max(0, Math.min(nq, used - (first - 1)));
+    pages.push(buildPage(t, p, total, first, nq, nUsed));
+    usedPP.push(nUsed);
+    first += nq;
+  }
+  var L = { page_w: PAGE_W, page_h: PAGE_H, margin: MARGIN, form_id: null, total_pages: total, questions_per_page: usedPP,
+    stroke_mm: 0.25, template: t, pages: pages, form_key: '', version: t.tracks ? 2 : 1 };
+  L.form_key = mk.headerFormKey(layoutHeader(L, 0));
+  pages.forEach(function (pg) {    // the header cells are only known once the layout exists
+    var rows = mk.encodeHeader(layoutHeader(L, pg.index)), hr = headerCellRects(), cells = [];
+    for (var r = 0; r < hr.length; r++) for (var c = 0; c < hr[r].length; c++) cells.push({ rect: hr[r][c], bit: rows[r][c] });
+    pg.meta_cells = cells;
+  });
+  return L;
+}
+
+// The layout a self-describing sheet describes (texts are not part of the header: no title)
+function layoutFromHeader(h) {           // omr/layout.py:402
+  return buildLayout(Template({ questions: h.questions, choices: h.choices, id_digits: h.id_digits, pages: h.pages,
+    choice_labels: mk.headerChoiceLabels(h), used: h.used, subject_digits: h.subject_digits,
+    min_bubble_mm: mk.BUBBLE_BASE_MM + mk.BUBBLE_STEP_MM * h.bubble, title: '', tracks: h.version >= 2 }));
+}
+
+var _layoutCache = {};
+// omr/recognize.py:570 layout_for_header: cached by form_key (the cached Layout is shared: treat it as read-only)
+function layoutForHeader(h) {
+  var key = mk.headerFormKey(h), L = _layoutCache[key];
+  if (!L) L = _layoutCache[key] = layoutFromHeader(h);
+  return L;
+}
+
+// Inverse of headerFormKey ("Q100U80C5D8S2P2L0B0V1") for self-describing sheets; throws otherwise
+function headerFromFormKey(formKey, page) {   // omr/layout.py:411
+  var m = /^Q(\d+)U(\d+)C(\d+)D(\d+)S(\d+)P(\d+)L(\d+)B(\d+)V(\d+)$/.exec(formKey || '');
+  if (m === null) throw new Error('not a self-describing form key: ' + JSON.stringify(formKey));
+  var v = m.slice(1).map(Number);
+  var h = mk.Header(v[0], v[1], v[2], v[3], v[4], v[5], page || 0, v[6], v[7], v[8]);
+  mk.validateHeader(h);
+  return h;
+}
+
+function describe(L) {                   // omr/layout.py:422: one-line human description of a form (Korean)
+  var t = L.template, used = t.used || t.questions;
+  var q = used === t.questions ? used + '문항' : t.questions + '문항 양식 중 ' + used + '문항';
+  return q + ' · ' + t.choices + '지선다 · ' + L.total_pages + '쪽 · 수험번호 ' + t.id_digits +
+    '자리' + (t.subject_digits ? ' · 과목코드 ' + t.subject_digits + '자리' : '');
+}
+
+// Layout.from_dict: layouts saved by older versions load (missing fields take defaults, legacy sheets are fixed up).  Input is
+// a plain object as produced by JSON.parse(layout JSON) / Python Layout.to_dict(); returns a normalised deep copy.
+function layoutFromDict(d) {
+  var L = JSON.parse(JSON.stringify(d));
+  L.template = Template(L.template);
+  L.version = L.version || 0;
+  L.form_key = L.form_key || '';
+  if (L.form_id === undefined) L.form_id = null;
+  L.pages.forEach(function (pg) {
+    if (pg.subject_grid === undefined) pg.subject_grid = null;
+    if (pg.subject_label === undefined) pg.subject_label = null;
+    if (pg.ticks === undefined) pg.ticks = [];
+  });
+  if (L.version === 0) {      // legacy layout: no subject code, form identified by its 16-bit id
+    L.template.subject_digits = 0;
+    L.form_key = L.form_key || 'F' + ('0000' + L.form_id.toString(16).toUpperCase()).slice(-4);
+  }
+  if (L.version < 2) L.template.tracks = false;   // saved before timing tracks existed
+  return L;
+}
+
+function idColumns(n, gx0, writeinTop, bubTop, ipx, ipy) {   // omr/layout.py:434
+  var cols = [];
+  for (var i = 0; i < n; i++) {
+    var cx = gx0 + (i + 0.5) * ipx, bubbles = [];
+    for (var v = 0; v < 10; v++) bubbles.push({ value: v, cx: _r(cx), cy: _r(bubTop + (v + 0.5) * ipy) });
+    cols.push({ digit_index: i, writein: _rect(cx - ipx / 2 + 0.4, writeinTop, ipx - 0.8, ID_WRITEIN_H), bubbles: bubbles });
+  }
+  return cols;
+}
+
+function rowLabels(gx0, bubTop, ipy, kind) {
+  var out = [];
+  for (var v = 0; v < 10; v++) out.push(Text(String(v), _r(gx0 - 1.5), _r(bubTop + (v + 0.5) * ipy + 1.1), 7, 'r', 0.5, kind));
+  return out;
+}
+
+// nq: printed question slots on this page (geometry); nUsed: how many of them are used (printed and read)
+function buildPage(t, p, total, firstQ, nq, nUsed) {     // omr/layout.py:446
+  var mspecs = [];
+  mk.CORNERS.forEach(function (c) {
+    var xy = markerRects(p)[c], x = xy[0], y = xy[1];
+    mspecs.push({ id: mk.markerId(p, c), corner: c, rect: _rect(x, y, MARKER_MM, MARKER_MM),
+      quiet: _rect(x - QUIET_MM, y - QUIET_MM, MARKER_MM + 2 * QUIET_MM, MARKER_MM + 2 * QUIET_MM) });
+  });
+  var hr = headerCellRects();
+  var metaRect = _rect(hr[0][0][0], hr[0][0][1], HEADER_CELL_W * mk.HEADER_ROW_CELLS, hr[hr.length - 1][0][1] + HEADER_ROW_H - hr[0][0][1]);
+
+  var texts = [];
+  var freeW = PAGE_W - 2 * (MARGIN + MARKER_MM + QUIET_MM);     // title (shrunk to fit between markers)
+  if (t.title) {
+    var size = 13.0;
+    while (size > 7 && textWidthMm(t.title, size) > freeW) size -= 0.5;
+    texts.push(Text(t.title, PAGE_W / 2, TITLE_Y, size, 'c', 0.0, 'title'));
+  }
+  var fx = MARGIN + MARKER_MM + QUIET_MM, used = t.used || t.questions;
+  var qtxt = 'Q1-' + used + (used !== t.questions ? ' of ' + t.questions : '');
+  texts.push(Text('page ' + (p + 1) + ' / ' + total + '  |  ' + qtxt, fx, 280.0, 8, 'l', 0.3, 'footer'));
+  if (t.instruction) texts.push(Text(t.instruction, fx, 285.0, 7, 'l', 0.4, 'instruction'));
+
+  // ---- student info area: ID grid, subject-code grid, name box
+  var g3 = idGeometry(t), idia = g3[0], ipx = g3[1], ipy = g3[2];
+  var iBottom = infoBottom(t), left = frameLeft(t);
+  var infoBox = _rect(left, INFO_TOP, PAGE_W - 2 * left, iBottom - INFO_TOP);
+  var labelY = INFO_TOP + PAD + 3.5;
+  var idLabel = Text(t.label_id, left + PAD, labelY, 9, 'l', 0.0, 'id_label');
+  var writeinTop = INFO_TOP + PAD + 5, bubTop = writeinTop + ID_WRITEIN_H + 2, gx0 = left + PAD + ID_ROW_LABEL_W;
+  var grid = { bubble_diameter: _r(idia), columns: idColumns(t.id_digits, gx0, writeinTop, bubTop, ipx, ipy),
+    row_labels: rowLabels(gx0, bubTop, ipy, 'id_row') };
+  var nx = gx0 + t.id_digits * ipx + 8, subjectGrid = null, subjectLabel = null;
+  if (t.subject_digits) {
+    var sx0 = gx0 + t.id_digits * ipx + SUBJ_GAP;
+    subjectGrid = { bubble_diameter: _r(idia), columns: idColumns(t.subject_digits, sx0, writeinTop, bubTop, ipx, ipy),
+      row_labels: rowLabels(sx0, bubTop, ipy, 'subject_row') };
+    subjectLabel = Text(t.label_subject, _r(sx0 - ID_ROW_LABEL_W + 1.0), labelY, 9, 'l', 0.0, 'subject_label');
+    nx = Math.max(sx0 + t.subject_digits * ipx, sx0 - ID_ROW_LABEL_W + 1.0 + textWidthMm(t.label_subject, 9)) + 8;
+  }
+  var nw = PAGE_W - left - PAD - nx;
+  if (nw < 25) throw new Error('no room for the name box (too many ID / subject digits)');
+  var nameBox = _rect(nx, writeinTop, nw, NAME_BOX_H);
+  var nameLabel = Text(t.label_name, _r(nx), _r(labelY), 9, 'l', 0.0, 'name_label');
+
+  // ---- answer area (geometry from all nq slots; only the first nUsed are printed and read)
+  var abox = answerArea(t), cg = chooseGrid(t, nq);
+  var ncols = cg[0], rows = cg[1], px = cg[2], py = cg[3], colW = cg[4];
+  var dia = Math.max(t.min_bubble_mm, Math.min(MAX_BUBBLE, 0.7 * Math.min(px, py)));
+  var columns = [], q = 0, yRows = abox[1] + ANS_HEADER_H + 2.0;
+  for (var c = 0; c < ncols; c++) {
+    var cx0 = abox[0] + c * (colW + ANS_GAP), inCol = Math.min(rows, nq - q, nUsed - q);
+    if (inCol <= 0) break;
+    var headers = [];
+    for (var k = 0; k < t.choices; k++)
+      headers.push(Text(t.choice_labels[k], _r(cx0 + QNUM_W + (k + 0.5) * px), _r(abox[1] + 4.2), 8, 'c', 0.35, 'choice_label'));
+    var bands = [], qs = [];
+    for (var r = 0; r < inCol; r++) {
+      if (Math.floor(r / BAND_ROWS) % 2 === 1) bands.push({ rect: _rect(cx0, yRows + r * py, colW, py), gray: 0.95 });
+      var cy = yRows + (r + 0.5) * py, number = firstQ + q, bubbles = [];
+      for (k = 0; k < t.choices; k++) bubbles.push({ choice: k, label: t.choice_labels[k], cx: _r(cx0 + QNUM_W + (k + 0.5) * px), cy: _r(cy) });
+      qs.push({ number: number, num_text: Text(String(number), _r(cx0 + QNUM_W - 2.0), _r(cy + 1.2), 9, 'r', 0.0, 'qnum'), bubbles: bubbles });
+      q += 1;
+    }
+    columns.push({ rect: _rect(cx0, abox[1], colW, ANS_HEADER_H + 2.0 + rows * py), headers: headers, bands: bands, questions: qs });
+  }
+  var ticks = [];
+  if (t.tracks) {
+    var tr = trackTickRects();
+    Object.keys(tr).forEach(function (side) { tr[side].forEach(function (rc, i) { ticks.push({ side: side, index: i, rect: rc }); }); });
+  }
+  return { index: p, markers: mspecs, meta_rect: metaRect, meta_cells: [], info_box: infoBox, id_grid: grid, id_label: idLabel,
+    name_box: _rect.apply(null, nameBox), name_label: nameLabel, answer_box: _rect.apply(null, abox), bubble_diameter: _r(dia),
+    first_question: firstQ, n_questions: nUsed, columns: columns, texts: texts, subject_grid: subjectGrid, subject_label: subjectLabel,
+    ticks: ticks };
+}
+
+O.layout = {
+  PAGE_W: PAGE_W, PAGE_H: PAGE_H, MARGIN: MARGIN, MARKER_MM: MARKER_MM, QUIET_MM: QUIET_MM, META_CELL_W: META_CELL_W, META_CELL_H: META_CELL_H,
+  META_Y: META_Y, HEADER_CELL_W: HEADER_CELL_W, HEADER_ROW_H: HEADER_ROW_H, HEADER_ROW_Y: HEADER_ROW_Y, TITLE_Y: TITLE_Y,
+  SERIAL_CELL_W: SERIAL_CELL_W, SERIAL_CELL_H: SERIAL_CELL_H, SERIAL_Y: SERIAL_Y, SERIAL_CLEARANCE: SERIAL_CLEARANCE, INFO_TOP: INFO_TOP,
+  TRACK_PITCH: TRACK_PITCH, TRACK_LEN: TRACK_LEN, TRACK_LR_W: TRACK_LR_W, TRACK_TB_H: TRACK_TB_H, TRACK_EDGE_LR: TRACK_EDGE_LR,
+  TRACK_EDGE_TB: TRACK_EDGE_TB, TRACK_N_LR: TRACK_N_LR, TRACK_N_TB: TRACK_N_TB, FRAME_INSET_TRACKS: FRAME_INSET_TRACKS,
+  Template: Template, Text: Text, markerRects: markerRects, metaCellRects: metaCellRects, headerCellRects: headerCellRects,
+  trackTickRects: trackTickRects, trackTickCenters: trackTickCenters, serialCellRects: serialCellRects, serialLabel: serialLabel,
+  pageCapacity: pageCapacity, validate: validate, buildLayout: buildLayout, layoutHeader: layoutHeader,
+  layoutFromHeader: layoutFromHeader, layoutForHeader: layoutForHeader, headerFromFormKey: headerFromFormKey, describe: describe,
+  layoutFromDict: layoutFromDict, floorDiv: floorDiv
+};
+})(globalThis.OMR = globalThis.OMR || {});
+
+// Answer-sheet maker (main thread only, not part of the recognizer): Layout -> drawing ops -> canvas preview / vector PDF.
+// Mirrors omr/render_pdf.py: the Layout (web/src/layout.js) decides every position, nothing here makes geometry decisions.
+// PDF: graphics are vector; text is rasterised once per distinct string at 600 dpi into 1-bit stencil masks (a PDF cannot
+// use the phone's system font without embedding it, and embedding a CJK font would add megabytes).  A page of the form is
+// one shared Form XObject, so N numbered copies only add a few bytes each.
+(function (O) {
+'use strict';
+var mk = O.markers, ly = O.layout;
+var MM_PT = 72 / 25.4;
+var TEXT_DPI = 600, TEXT_PX_MM = TEXT_DPI / 25.4;
+var FONT = '"Apple SD Gothic Neo","Noto Sans CJK KR","Noto Sans KR","Malgun Gothic","Nanum Gothic",system-ui,sans-serif';
+
+// ---- ops of one page (optionally with a serial number); coordinates in mm, origin top-left
+function pageOps(L, pageIndex, serial, withSerial) {
+  var pg = L.pages[pageIndex], ops = [];
+  function rect(r, fill, stroke) { ops.push({ t: 'rect', r: r, fill: fill, stroke: !!stroke }); }
+  function text(t) { ops.push({ t: 'text', text: t.text, x: t.x, y: t.y, size: t.size_pt, align: t.align, gray: t.gray }); }
+  pg.columns.forEach(function (col) { col.bands.forEach(function (b) { rect(b.rect, b.gray, false); }); });
+  rect(pg.info_box, null, true); rect(pg.answer_box, null, true); rect(pg.name_box, null, true);
+  pg.markers.forEach(function (m) {
+    var bits = mk.markerBits(m.id), k = bits.length, cs = m.rect[2] / k;
+    rect(m.rect, 0, false);
+    for (var r = 0; r < k; r++) {
+      var x = 0;
+      while (x < k) {
+        if (bits[r][x]) { x++; continue; }
+        var x2 = x;
+        while (x2 < k && !bits[r][x2]) x2++;
+        rect([m.rect[0] + x * cs, m.rect[1] + r * cs, (x2 - x) * cs, cs], 1, false);
+        x = x2;
+      }
+    }
+  });
+  pg.meta_cells.forEach(function (c) { if (c.bit) rect(c.rect, 0, false); });
+  pg.ticks.forEach(function (t) { rect(t.rect, 0, false); });
+  if (withSerial && serial) {
+    var bits = mk.encodeSerial(serial), cells = ly.serialCellRects();
+    for (var i = 0; i < cells.length; i++) if (bits[i]) rect(cells[i], 0, false);
+    text(ly.serialLabel(serial));
+  }
+  [pg.id_grid, pg.subject_grid].forEach(function (g) {
+    if (!g) return;
+    g.columns.forEach(function (col) {
+      rect(col.writein, null, true);
+      col.bubbles.forEach(function (b) { ops.push({ t: 'circle', cx: b.cx, cy: b.cy, r: g.bubble_diameter / 2 }); });
+    });
+  });
+  pg.columns.forEach(function (col) {
+    col.questions.forEach(function (q) { q.bubbles.forEach(function (b) { ops.push({ t: 'circle', cx: b.cx, cy: b.cy, r: pg.bubble_diameter / 2 }); }); });
+  });
+  var subj = pg.subject_grid ? [pg.subject_label].concat(pg.subject_grid.row_labels) : [];
+  [pg.id_label, pg.name_label].concat(pg.texts, pg.id_grid.row_labels, subj).forEach(text);
+  pg.columns.forEach(function (col) { col.headers.forEach(text); col.questions.forEach(function (q) { text(q.num_text); }); });
+  return ops;
+}
+
+// ---- canvas preview
+function drawCanvas(canvas, L, pageIndex, serial, widthPx) {
+  var s = widthPx / L.page_w;
+  canvas.width = Math.round(L.page_w * s); canvas.height = Math.round(L.page_h * s);
+  var c = canvas.getContext('2d');
+  c.fillStyle = '#fff'; c.fillRect(0, 0, canvas.width, canvas.height);
+  c.lineWidth = Math.max(1, L.stroke_mm * s);
+  function gray(g) { var v = Math.round(g * 255); return 'rgb(' + v + ',' + v + ',' + v + ')'; }
+  pageOps(L, pageIndex, serial, true).forEach(function (o) {
+    if (o.t === 'rect') {
+      var r = o.r;
+      if (o.fill !== null) { c.fillStyle = gray(o.fill); c.fillRect(r[0] * s, r[1] * s, r[2] * s, r[3] * s); }
+      if (o.stroke) { c.strokeStyle = '#000'; c.strokeRect(r[0] * s, r[1] * s, r[2] * s, r[3] * s); }
+    } else if (o.t === 'circle') {
+      c.strokeStyle = '#000'; c.beginPath(); c.arc(o.cx * s, o.cy * s, o.r * s, 0, 2 * Math.PI); c.stroke();
+    } else {
+      c.fillStyle = gray(o.gray); c.font = (o.size / MM_PT * s) + 'px ' + FONT;
+      c.textAlign = o.align === 'c' ? 'center' : o.align === 'r' ? 'right' : 'left'; c.textBaseline = 'alphabetic';
+      c.fillText(o.text, o.x * s, o.y * s);
+    }
+  });
+}
+
+// ---- text -> 1-bit stencil (PDF ImageMask: sample 0 paints)
+function textStencil(text, sizePt) {
+  var px = sizePt / MM_PT * TEXT_PX_MM, cv = document.createElement('canvas'), c = cv.getContext('2d');
+  c.font = px + 'px ' + FONT;
+  var w = Math.ceil(c.measureText(text).width) + 4, asc = Math.ceil(px * 1.05) + 2, desc = Math.ceil(px * 0.4) + 2;
+  cv.width = w; cv.height = asc + desc;
+  c = cv.getContext('2d');
+  c.fillStyle = '#fff'; c.fillRect(0, 0, w, cv.height);
+  c.fillStyle = '#000'; c.font = px + 'px ' + FONT; c.textBaseline = 'alphabetic'; c.textAlign = 'left';
+  c.fillText(text, 2, asc);
+  var d = c.getImageData(0, 0, w, cv.height).data, rb = (w + 7) >> 3, out = new Uint8Array(rb * cv.height);
+  out.fill(0xFF);
+  for (var y = 0; y < cv.height; y++) for (var x = 0; x < w; x++)
+    if (d[(y * w + x) * 4] < 140) out[y * rb + (x >> 3)] &= ~(0x80 >> (x & 7));      // dark pixel -> bit 0 -> painted
+  return { w: w, h: cv.height, data: out, ox: 2 / TEXT_PX_MM, asc: asc / TEXT_PX_MM, width: (w - 4) / TEXT_PX_MM, hmm: cv.height / TEXT_PX_MM };
+}
+
+// ---- PDF writer
+var enc = new TextEncoder();
+function num(v) { var s = (+v).toFixed(3); return s.indexOf('.') < 0 ? s : s.replace(/0+$/, '').replace(/\.$/, ''); }
+function concat(parts) {
+  var n = 0, i; for (i = 0; i < parts.length; i++) n += parts[i].length;
+  var out = new Uint8Array(n), o = 0; for (i = 0; i < parts.length; i++) { out.set(parts[i], o); o += parts[i].length; }
+  return out;
+}
+async function deflate(bytes) {
+  if (typeof CompressionStream === 'undefined') return null;
+  try {
+    var cs = new CompressionStream('deflate'), w = cs.writable.getWriter();
+    w.write(bytes); w.close();
+    return new Uint8Array(await new Response(cs.readable).arrayBuffer());
+  } catch (e) { return null; }
+}
+
+// ops -> PDF content stream text; `img(text,size)` registers a stencil and returns its resource name
+function contentStream(L, ops, img) {
+  var H = L.page_h, out = [], K = 0.5522847498;
+  function X(x) { return num(x * MM_PT); }
+  function Y(y) { return num((H - y) * MM_PT); }
+  out.push(num(L.stroke_mm * MM_PT) + ' w 0 G 0 g');
+  var curFill = 0;
+  function fillG(g) { if (g !== curFill) { out.push(num(g) + ' g'); curFill = g; } }
+  ops.forEach(function (o) {
+    if (o.t === 'rect') {
+      var r = o.r, p = X(r[0]) + ' ' + Y(r[1] + r[3]) + ' ' + num(r[2] * MM_PT) + ' ' + num(r[3] * MM_PT) + ' re';
+      if (o.fill !== null) { fillG(o.fill); out.push(p + ' f'); } else if (o.stroke) out.push(p + ' S');
+    } else if (o.t === 'circle') {
+      var cx = o.cx * MM_PT, cy = (H - o.cy) * MM_PT, r2 = o.r * MM_PT, k = K * r2;
+      out.push(num(cx + r2) + ' ' + num(cy) + ' m ' +
+        num(cx + r2) + ' ' + num(cy + k) + ' ' + num(cx + k) + ' ' + num(cy + r2) + ' ' + num(cx) + ' ' + num(cy + r2) + ' c ' +
+        num(cx - k) + ' ' + num(cy + r2) + ' ' + num(cx - r2) + ' ' + num(cy + k) + ' ' + num(cx - r2) + ' ' + num(cy) + ' c ' +
+        num(cx - r2) + ' ' + num(cy - k) + ' ' + num(cx - k) + ' ' + num(cy - r2) + ' ' + num(cx) + ' ' + num(cy - r2) + ' c ' +
+        num(cx + k) + ' ' + num(cy - r2) + ' ' + num(cx + r2) + ' ' + num(cy - k) + ' ' + num(cx + r2) + ' ' + num(cy) + ' c S');
+    } else {
+      var st = img(o.text, o.size), left = o.align === 'c' ? o.x - st.width / 2 : o.align === 'r' ? o.x - st.width : o.x;
+      fillG(o.gray);
+      out.push('q ' + num(st.w / TEXT_PX_MM * MM_PT) + ' 0 0 ' + num(st.hmm * MM_PT) + ' ' + X(left - st.ox) + ' ' + Y(o.y + (st.hmm - st.asc)) + ' cm /' + st.name + ' Do Q');
+    }
+  });
+  return enc.encode(out.join('\n'));
+}
+
+// opts: {serials: [..] | null}; returns Uint8Array
+async function makePdf(L, serials, title) {
+  var objs = [], stencils = {}, nStencil = 0;
+  function add(dict, data, filter) { objs.push({ dict: dict, data: data || null, filter: filter || null }); return objs.length; }     // object number = index+1
+  function img(text, size) {
+    var key = size + '|' + text, st = stencils[key];
+    if (!st) {
+      st = stencils[key] = textStencil(text, size); st.name = 'T' + (++nStencil);
+      st.obj = add('/Type /XObject /Subtype /Image /Width ' + st.w + ' /Height ' + st.h + ' /ImageMask true /BitsPerComponent 1 /Decode [0 1]', st.data, true);
+    }
+    return st;
+  }
+  var sets = serials && serials.length ? serials : [0];
+  // reserve catalog + pages objects first (numbers 1, 2)
+  add('', null); add('', null);
+  // shared page bodies (everything but the serial) as Form XObjects
+  var forms = L.pages.map(function (pg, i) {
+    var body = contentStream(L, pageOps(L, i, 0, false), img);
+    return { body: body, obj: 0, name: 'F' + i };
+  });
+  forms.forEach(function (f) { f.obj = add('', f.body, true); });
+  var pageW = L.page_w * MM_PT, pageH = L.page_h * MM_PT;
+  function xobjDict() {
+    var s = '/XObject <<'; forms.forEach(function (f) { s += ' /' + f.name + ' ' + f.obj + ' 0 R'; });
+    Object.keys(stencils).forEach(function (k) { s += ' /' + stencils[k].name + ' ' + stencils[k].obj + ' 0 R'; });
+    return s + ' >>';
+  }
+  // pages: content = form Do + serial strip & label
+  var pageContents = [];
+  sets.forEach(function (serial) { L.pages.forEach(function (pg, i) { pageContents.push({ i: i, serial: serial }); }); });
+  var serialOpsCache = {};
+  function serialOnly(serial) {
+    if (serialOpsCache[serial]) return serialOpsCache[serial];
+    var o = [], bits = mk.encodeSerial(serial), cells = ly.serialCellRects();
+    for (var k = 0; k < cells.length; k++) if (bits[k]) o.push({ t: 'rect', r: cells[k], fill: 0, stroke: false });
+    var t = ly.serialLabel(serial);
+    o.push({ t: 'text', text: t.text, x: t.x, y: t.y, size: t.size_pt, align: t.align, gray: t.gray });
+    return (serialOpsCache[serial] = o);
+  }
+  var pageStreams = pageContents.map(function (pc) {
+    var extra = pc.serial ? contentStream(L, serialOnly(pc.serial), img) : new Uint8Array(0);
+    return concat([enc.encode('/F' + pc.i + ' Do\n'), extra]);
+  });
+  var pageObjs = pageStreams.map(function (s) { return add('', s, true); });
+  var pageDictObjs = pageObjs.map(function (co) { return add('', null); });
+  // fill in the placeholders now that all XObjects (incl. stencils created by the serial labels) are known
+  var res = xobjDict();
+  pageDictObjs.forEach(function (n, k) {
+    objs[n - 1].dict = '/Type /Page /Parent 2 0 R /MediaBox [0 0 ' + num(pageW) + ' ' + num(pageH) + '] /Resources << ' + res + ' >> /Contents ' + pageObjs[k] + ' 0 R';
+  });
+  forms.forEach(function (f) {
+    objs[f.obj - 1].dict = '/Type /XObject /Subtype /Form /BBox [0 0 ' + num(pageW) + ' ' + num(pageH) + '] /Resources << ' + res + ' >>';
+  });
+  objs[0].dict = '/Type /Catalog /Pages 2 0 R';
+  objs[1].dict = '/Type /Pages /Count ' + pageDictObjs.length + ' /Kids [' + pageDictObjs.map(function (n) { return n + ' 0 R'; }).join(' ') + ']';
+  var info = add('/Title (' + String(title || 'OMR form').replace(/[^\x20-\x7e]/g, '').replace(/[()\\]/g, '') + ') /Producer (StreamOMR)', null);
+  // serialise
+  var parts = [enc.encode('%PDF-1.5\n%\xe2\xe3\xcf\xd3\n')], offsets = [], pos = parts[0].length;
+  for (var i = 0; i < objs.length; i++) {
+    var ob = objs[i], head, data = ob.data;
+    if (data && ob.filter) {
+      var z = await deflate(data);
+      if (z && z.length < data.length) { data = z; head = ob.dict + ' /Filter /FlateDecode'; } else head = ob.dict;
+    } else head = ob.dict;
+    var chunk = data ? concat([enc.encode((i + 1) + ' 0 obj\n<< ' + head + ' /Length ' + data.length + ' >>\nstream\n'), data, enc.encode('\nendstream\nendobj\n')])
+                     : enc.encode((i + 1) + ' 0 obj\n<< ' + head + ' >>\nendobj\n');
+    offsets.push(pos); parts.push(chunk); pos += chunk.length;
+  }
+  var xr = 'xref\n0 ' + (objs.length + 1) + '\n0000000000 65535 f \n';
+  offsets.forEach(function (o) { xr += ('0000000000' + o).slice(-10) + ' 00000 n \n'; });
+  xr += 'trailer\n<< /Size ' + (objs.length + 1) + ' /Root 1 0 R /Info ' + info + ' 0 R >>\nstartxref\n' + pos + '\n%%EOF\n';
+  parts.push(enc.encode(xr));
+  return concat(parts);
+}
+
+O.sheet = { pageOps: pageOps, drawCanvas: drawCanvas, makePdf: makePdf };
+})(globalThis.OMR = globalThis.OMR || {});
+</script>
 <script>
 'use strict';
 const DEV = false;   // true only in the dev build (scripts/build_web.py --dev): see web/dev.js
@@ -7215,6 +8274,124 @@ $('start').onclick = async () => {
 if (!navigator.mediaDevices) $('hint').textContent = '카메라를 사용할 수 없습니다. https 또는 localhost 로 접속하세요.';
 renderLoop();
 startWorker();
+
+// Answer-sheet maker window (mobile-first full-screen sheet), the JS counterpart of the Python app's "답안지 양식 만들기" page.
+// Needs web/src/{util,markers,layout,sheet}.js (inlined before this file) and `$` from app.js.
+(function () {
+const O = globalThis.OMR, mk = O.markers, ly = O.layout, sh = O.sheet;
+const root = $('mk');
+if (!root) return;
+const f = {   // field definitions: key, label, hint, min, max, default (null = optional, empty means automatic)
+  questions: { min: 1, max: 1023, v: 45 }, choices: { min: 2, max: 10, v: 5 },
+  id_digits: { min: 1, max: 12, v: 8 }, subject_digits: { min: 0, max: 3, v: 2 },
+  used: { min: 1, max: 1023, v: null }, pages: { min: 1, max: 16, v: null },
+  copies: { min: 1, max: 500, v: 30 }, start: { min: 1, max: mk.SERIAL_MAX, v: 1 },
+};
+let L = null, page = 0, timer = 0, lastPdf = null;
+
+function stepper(key) {
+  const d = f[key], el = $('mk-' + key);
+  el.inputMode = 'numeric';
+  el.value = d.v === null ? '' : d.v;
+  const set = v => { el.value = v; changed(); };
+  const cur = () => el.value === '' ? null : Math.round(Number(el.value));
+  const clamp = v => Math.max(d.min, Math.min(d.max, v));
+  $('mk-' + key + '-m').onclick = () => { const c = cur(); if (c === null) return; set(c <= d.min && d.v === null ? '' : clamp(c - 1)); };
+  $('mk-' + key + '-p').onclick = () => { const c = cur(); set(clamp(c === null ? (key === 'used' ? Number($('mk-questions').value) || d.min : d.min) : c + 1)); };
+  el.addEventListener('input', changed);
+  el.addEventListener('blur', () => { const c = cur(); if (c !== null && (!isFinite(c) || c < d.min || c > d.max)) el.value = clamp(isFinite(c) ? c : d.min); changed(); });
+}
+function val(key) { const v = $('mk-' + key).value.trim(); return v === '' ? null : Math.round(Number(v)); }
+
+function template() {
+  const choices = val('choices') || 5;
+  const style = mk.LABEL_STYLES.indexOf($('mk-labels').value);
+  return ly.Template({ title: $('mk-title').value.trim(), questions: val('questions') || 45, choices, id_digits: val('id_digits') || 8,
+    subject_digits: val('subject_digits') ?? 2, pages: val('pages'), used: val('used'),
+    choice_labels: mk.choiceLabels(style < 0 ? 0 : style, choices), min_bubble_mm: Number($('mk-bubble').value) });
+}
+function serialsList() {
+  if (!$('mk-numbered').checked) return null;
+  const n = val('copies') || 1, s = val('start') || 1, out = [];
+  for (let i = 0; i < n; i++) out.push(s + i);
+  return out;
+}
+function changed() {
+  $('mk-numopts').hidden = !$('mk-numbered').checked;
+  clearTimeout(timer); timer = setTimeout(refresh, 250);
+  $('mk-result').hidden = true;
+}
+function refresh() {
+  const err = $('mk-err'), go = $('mk-go');
+  try {
+    const t = template();
+    if (t.used && t.used > t.questions) throw new Error('실제 사용 문항이 문항 수보다 많습니다');
+    L = ly.buildLayout(t);
+    if ($('mk-numbered').checked) {
+      const s = serialsList(), last = s[s.length - 1];
+      if (last > mk.SERIAL_MAX) throw new Error(`일련번호는 ${mk.SERIAL_MAX}까지입니다 (시작 ${s[0]} + ${s.length}부 = ${last})`);
+    }
+  } catch (e) { L = null; err.textContent = String(e.message || e); err.hidden = false; go.disabled = true; $('mk-info').textContent = ''; $('mk-tabs').innerHTML = ''; return; }
+  err.hidden = true; go.disabled = false;
+  $('mk-info').innerHTML = `<b>${ly.describe(L)}<\/b><br><span class="mut small">${L.form_key} · 쪽당 ${L.questions_per_page.join('/')}문항<\/span>`;
+  if (page >= L.total_pages) page = 0;
+  const tabs = $('mk-tabs'); tabs.innerHTML = '';
+  if (L.total_pages > 1) for (let i = 0; i < L.total_pages; i++) {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = (i + 1) + '쪽';
+    b.className = 'secondary' + (i === page ? ' on' : ''); b.onclick = () => { page = i; refresh(); }; tabs.appendChild(b);
+  }
+  const cv = $('mk-pv'), w = Math.min(900, Math.round(($('mk-pvbox').clientWidth || 340) * Math.min(2, window.devicePixelRatio || 1)));
+  const s = serialsList();
+  sh.drawCanvas(cv, L, page, s ? s[0] : 0, w);
+}
+
+async function make() {
+  if (!L) return;
+  const go = $('mk-go'), msg = $('mk-prog');
+  go.disabled = true; msg.hidden = false; msg.textContent = 'PDF 만드는 중...';
+  await new Promise(r => setTimeout(r, 30));
+  try {
+    const serials = serialsList();
+    const bytes = await sh.makePdf(L, serials, 'OMR form ' + L.form_key);
+    const name = `form_${L.form_key}` + (serials ? `_no${String(serials[0]).padStart(4, '0')}-${String(serials[serials.length - 1]).padStart(4, '0')}` : '') + '.pdf';
+    if (lastPdf) URL.revokeObjectURL(lastPdf.url);
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    lastPdf = { url: URL.createObjectURL(blob), blob, name };
+    $('mk-fileinfo').textContent = `${name} · ${(bytes.length / 1024).toFixed(0)} KB · ${L.total_pages * (serials ? serials.length : 1)}쪽` + (serials ? ` · No. ${String(serials[0]).padStart(4, '0')} ~ ${String(serials[serials.length - 1]).padStart(4, '0')}` : '');
+    $('mk-open').href = lastPdf.url; $('mk-save').href = lastPdf.url; $('mk-save').download = name;
+    $('mk-share').hidden = !(navigator.canShare && navigator.canShare({ files: [new File([blob], name, { type: 'application/pdf' })] }));
+    $('mk-result').hidden = false;
+    if (serials) {   // numbers are issued: continue after them next time (per form)
+      try { localStorage.setItem('streamomr.nextSerial.' + L.form_key, String(serials[serials.length - 1] + 1)); } catch (e) {}
+    }
+    msg.hidden = true;
+    $('mk-result').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  } catch (e) { msg.textContent = 'PDF를 만들 수 없습니다: ' + (e.message || e); }
+  go.disabled = !L;
+}
+
+function open() {
+  root.hidden = false; document.body.style.overflow = 'hidden';
+  if (L) try { const n = localStorage.getItem('streamomr.nextSerial.' + L.form_key); if (n) $('mk-start').value = n; } catch (e) {}
+  refresh();
+}
+function close() { root.hidden = true; document.body.style.overflow = ''; }
+
+Object.keys(f).forEach(stepper);
+['mk-title', 'mk-labels', 'mk-bubble', 'mk-numbered'].forEach(id => $(id).addEventListener('input', changed));
+$('mk-numbered').addEventListener('change', () => {
+  if ($('mk-numbered').checked && L) try { const n = localStorage.getItem('streamomr.nextSerial.' + L.form_key); if (n) $('mk-start').value = n; } catch (e) {}
+  changed();
+});
+$('mk-go').onclick = make;
+$('mk-x').onclick = close;
+$('mk-share').onclick = async () => {
+  try { await navigator.share({ files: [new File([lastPdf.blob], lastPdf.name, { type: 'application/pdf' })], title: lastPdf.name }); } catch (e) {}
+};
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !root.hidden) close(); });
+$('make').onclick = open;
+window.addEventListener('resize', () => { if (!root.hidden) { clearTimeout(timer); timer = setTimeout(refresh, 150); } });
+})();
 
 
 </script>

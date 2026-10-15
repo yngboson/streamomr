@@ -14,6 +14,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_ORDER = ["util", "markers", "layout", "types", "identity", "decide", "fusion", "revision", "stream", "cv", "aruco", "cvx",
              "fastops", "ink", "illum", "tracks", "detect", "recognize", "scanner"]
+MAIN_ORDER = ["util", "markers", "layout", "sheet"]     # the sheet maker runs on the main thread
 CSS_KEEP = re.compile(r"^(:root|\*|body|a |h1|\.card|label|input|button|\.row|\.scan|@media \(max-width:760px\)|\.stage|\.banner|\.state|\.hint|\.stats|ul\.scans|\.badge|\.mut|\.small|\.err|\.tag)")
 
 
@@ -49,6 +50,8 @@ def worker_source(dev=False):
 def build(dev=False):
     html = read("web", "template.html")
     for key, val in (("/*__CSS__*/", css()), ("/*__WORKER__*/", esc(worker_source(dev))),
+                     ("/*__SHEET__*/", esc("\n".join(read("web", "src", m + ".js") for m in MAIN_ORDER))),
+                     ("/*__MAKER__*/", esc(read("web", "maker.js"))),
                      ("/*__APP__*/", esc(read("web", "app.js")).replace("/*__DEV__*/false", "true" if dev else "false")),
                      ("/*__DEVJS__*/", esc(read("web", "dev.js")) if dev else "")):
         assert key in html, key
