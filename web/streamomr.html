@@ -6643,22 +6643,45 @@ const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'
 function subjLabel(subject) { return subject === null || subject === undefined ? '과목? 미확인' : subject === '' ? '' : '과목 ' + subject; }
 
 // ---- results list
+// A rescan of a sheet that is already in the list replaces that entry (same list slot content, moved to the top) instead of
+// adding a second one.  Identity: the printed serial (+ page/form) when it was read, else a CONFIDENT student id + subject
+// code (+ page/form).  A sheet whose id/subject is unreadable (severe) has no identity: it is listed as new and flagged.
+function scanIdentity(s) {
+  const pg = s.page + '|' + (s.form_key || '');
+  if (s.serial) return 'S' + s.serial + '|' + pg;
+  if (s.severity !== 'severe' && s.student_id && s.subject) return 'I' + s.student_id + '|' + s.subject + '|' + pg;
+  return null;
+}
 function addScan(s, detail) {
+  const id = scanIdentity(s), old = id ? scans.find(o => scanIdentity(o) === id) : null;
+  if (old) {
+    s.li = old.li; s.rescans = (old.rescans || 0) + 1;
+    scans[scans.indexOf(old)] = s;
+    $('recent').prepend(s.li);
+    renderScan(s, detail);
+    return true;
+  }
   scans.push(s);
   s.li = document.createElement('li');
   renderScan(s, detail);
   $('recent').prepend(s.li);
   $('count').textContent = scans.length + '건'; $('csv').disabled = false;
+  return false;
 }
+// flags the person has no reason to see: a cut-off corner / dropped marker / unreadable serial never matter for grading
+const HIDDEN_FLAGS = ['corner_hidden', 'marker_dropped', 'serial_unreadable'];
+const visFlags = f => (f || []).filter(x => !HIDDEN_FLAGS.includes(x));
 function renderScan(s, detail) {
   const ans = s.answers.map(a => a.marked || '-').join(' ');
   const li = s.li, sev = s.severity || 'ok';
   li.style.flexDirection = 'column';
   li.style.borderLeft = sev === 'ok' ? '' : `4px solid var(--${sev === 'severe' ? 'bad' : 'warn'})`;
   const fixed = s.fixed && s.fixed.length ? ` <span class="tag">정정 ${esc(s.fixed.join(','))}<\/span>` : '';
-  const flags = s.flags.length ? ` <span class="tag warn">${esc(s.flags.join(','))}<\/span>` : '';
+  const vf = visFlags(s.flags), flags = vf.length ? ` <span class="tag warn">${esc(vf.join(','))}<\/span>` : '';
+  const again = s.rescans ? ` <span class="tag">재스캔 ${s.rescans}회 (덮어씀)<\/span>` : '';
+  const bad = sev === 'severe' ? ' <span class="badge needs_review" style="background:var(--bad);color:#fff">학번/과목 인식 실패 - 다시 스캔<\/span>' : '';
   li.innerHTML = `<span><b>${esc(subjLabel(s.subject))}<\/b> ${s.subject === '' ? '' : '&middot;'} <b>${esc(s.student_id ?? '(번호 없음)')}<\/b> &middot; ${s.page + 1}${s.total_pages ? '/' + s.total_pages : ''}페이지` +
-    (s.needs_review ? ' <span class="badge needs_review">확인 필요<\/span>' : '') + flags + `<\/span>` +
+    (s.needs_review && sev !== 'severe' ? ' <span class="badge needs_review">확인 필요<\/span>' : '') + bad + flags + again + `<\/span>` +
     `<span class="mut small" style="word-break:break-all">${esc(ans)}<\/span>`;
   if (fixed) li.firstChild.insertAdjacentHTML('beforeend', fixed);
   if (detail && detail.img) { li.onclick = () => showDetail(s, detail); li.title = '탭하면 인식 상세'; li.innerHTML += '<span class="mut small">탭하여 인식 상세 보기 &rsaquo;<\/span>'; }
@@ -6691,7 +6714,7 @@ function applyFix(s, d, fix) {
   }
   recount(s, d);
   renderScan(s, d);
-  if (scans[scans.length - 1] === s) $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}` + (s.severity === 'ok' ? ' · 정정 완료' : '');
+  if (lastScan === s) $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}` + (s.severity === 'ok' ? ' · 정정 완료' : '');
   return {};
 }
 const csvCell = v => { const s = v === null || v === undefined ? '' : String(v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
@@ -6999,7 +7022,7 @@ const OmrDetail = (() => {
 /* OMR-DETAIL-SHARED END */
 
 function showDetail(s, d) {
-  OmrDetail.open({ title: `${subjLabel(s.subject)} ${s.student_id ?? '(번호 없음)'} · ${s.page + 1}페이지`.trim(), flags: s.flags,
+  OmrDetail.open({ title: `${subjLabel(s.subject)} ${s.student_id ?? '(번호 없음)'} · ${s.page + 1}페이지`.trim(), flags: visFlags(s.flags),
                    src: 'data:image/jpeg;base64,' + d.img, d, onFix: fix => applyFix(s, d, fix) });
 }
 
@@ -7079,7 +7102,7 @@ function onResult(e, wms, tm) {
     const sev = s.severity || 'ok';
     feedback(sev); addScan(s, e.commit.detail); s.detail = e.commit.detail; lastScan = s;
     if (DEV) devOnCommit(s, e.commit);
-    $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}`;
+    $('res').textContent = `${subjLabel(s.subject)} · ${s.student_id ?? '(번호 없음)'}` + (s.rescans ? ' · 재스캔(덮어씀)' : '');
     if (e.commit.detail && e.commit.detail.img) fixButton(sev, () => showDetail(s, e.commit.detail));
   }
   if (e.revision && lastScan) {
